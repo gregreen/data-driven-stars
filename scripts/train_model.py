@@ -33,6 +33,12 @@ def load_data(fnames):
     # Add error floor into magnitude uncertainties
     err_floor = 0.02
     d['ps1_mag_err'] = np.sqrt(d['ps1_mag_err']**2 + err_floor**2)
+    for b in 'JHK':
+        d['tmass_{}_mag_err'.format(b)] = np.sqrt(
+              d['tmass_{}_mag_err'.format(b)]**2
+            + err_floor**2
+        )
+    d['unwise_mag_err'] = np.sqrt(d['unwise_mag_err']**2 + err_floor**2)
     for b in ('g', 'bp', 'rp'):
         d['gaia_'+b+'_mag_err'] = np.sqrt(
               d['gaia_'+b+'_mag_err']**2
@@ -64,6 +70,14 @@ def collapse_atm_params(d, b19, b19_err):
         ('SFD', 'f4'),
         ('ps1_mag', '5f4'),
         ('ps1_mag_err', '5f4'),
+        ('tmass_J_mag', 'f4'),
+        ('tmass_H_mag', 'f4'),
+        ('tmass_K_mag', 'f4'),
+        ('tmass_J_mag_err', 'f4'),
+        ('tmass_H_mag_err', 'f4'),
+        ('tmass_K_mag_err', 'f4'),
+        ('unwise_mag', '2f4'),
+        ('unwise_mag_err', '2f4'),
         ('gaia_g_mag', 'f4'),
         ('gaia_g_mag_err', 'f4'),
         ('gaia_bp_mag', 'f4'),
@@ -111,7 +125,7 @@ def get_corr_matrix(cov):
 
 
 def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
-    n_bands = 8 # Gaia (G, BP, RP), PS1 (grizy)
+    n_bands = 13 # Gaia (G, BP, RP), PS1 (grizy), 2MASS (JHK), unWISE (W1,W2)
 
     # Stellar spectroscopic parameters
     x = np.empty((d.size,3), dtype='f4')
@@ -131,13 +145,18 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
     y[:,0] = d['gaia_g_mag']
     y[:,1] = d['gaia_bp_mag']
     y[:,2] = d['gaia_rp_mag']
-    y[:,3:] = d['ps1_mag']
+    y[:,3:8] = d['ps1_mag']
+    y[:,8] = d['tmass_J_mag']
+    y[:,9] = d['tmass_H_mag']
+    y[:,10] = d['tmass_K_mag']
+    y[:,11:13] = d['unwise_mag']
 
     #idx_y_bad = np.isnan(y) # Replace NaN magnitudes with zero
     #y[idx_y_bad] = 0.
 
+    # Replace NaN magnitudes with median (in each band)
     for b in range(n_bands):
-        idx = np.isnan(y[:,b])
+        idx = ~np.isfinite(y[:,b])
         y[idx,b] = np.median(y[~idx,b])
 
     # Covariance of y
@@ -149,8 +168,12 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
     cov_y[:,2,2] += d['gaia_rp_mag_err']**2
     for k in range(5):
         cov_y[:,3+k,3+k] += d['ps1_mag_err'][:,k]**2
+    for k,b in enumerate('JHK'):
+        cov_y[:,8+k,8+k] += d['tmass_{}_mag_err'.format(b)][:]**2
+    for k in range(2):
+        cov_y[:,11+k,11+k] += d['unwise_mag_err'][:,k]**2
 
-    idx = np.isnan(cov_y) # Replace NaN errors with large number
+    idx = ~np.isfinite(cov_y) # Replace NaN errors with large number
     cov_y[idx] = 100.**2.
 
     # \delta A
@@ -211,13 +234,6 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
         r_pred = np.clip(r_pred, 0., 10.) # TODO: Update upper limit?
         r_var = np.clip(r_var, 0.05**2, 10.**2)
 
-        print('Delta r:')
-        print(r_pred - r)
-        print('r_pred:')
-        print(r_pred)
-        print('r_std:')
-        print(np.sqrt(r_var))
-
         r[:] = r_pred
         
         # Reddening uncertainty term in covariance of y
@@ -265,6 +281,7 @@ def predict_y(nn_model, x_p):
 
 def extract_R(nn_model):
     R = nn_model.get_layer('extinction_reddening').get_weights()[0][0]
+    #R = nn_model.get_layer('extinction').get_weights()[0][0]
     return R
 
 
@@ -302,7 +319,59 @@ class DataNormalizer(object):
         return isig_norm
 
 
-def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=8):
+from tensorflow.keras.constraints import Constraint
+from tensorflow.python.ops import math_ops
+
+class ReddeningConstraint(Constraint):
+    def __init__(self):
+        pass
+
+    def __call__(self, w):
+        print('')
+        print('__call__')
+        print(w.shape)
+        print(w)
+        print(w[...,0])
+        w = w * math_ops.cast(
+            #math_ops.greater_equal(w+w[...,0], 0.),
+            math_ops.greater_equal(tf.math.add(w,w[...,0]), 0.),
+            K.floatx()
+        )
+        print(w)
+        print('')
+        return w
+
+
+class ReddeningRegularizer(keras.regularizers.Regularizer):
+    """
+    Regularizer that punishes negative entries in the reddening vector.
+    Arguments:
+        l1: Float; L1 regularization factor.
+        l2: Float; L2 regularization factor.
+    """
+
+    def __init__(self, l1=0., l2=0.):
+        self.l1 = K.cast_to_floatx(l1)
+        self.l2 = K.cast_to_floatx(l2)
+
+    def __call__(self, x):
+        if not self.l1 and not self.l2:
+            return K.constant(0.)
+        regularization = 0.
+        x = tf.math.add(x, x[...,0])
+        #x = tf.clip_by_value(x, clip_value_max=0.)
+        x = tf.math.minimum(x, 0.)
+        if self.l1:
+            regularization += self.l1 * math_ops.reduce_sum(math_ops.abs(x))
+        if self.l2:
+            regularization += self.l2 * math_ops.reduce_sum(math_ops.square(x))
+        return regularization
+
+    def get_config(self):
+        return {'l1': float(self.l1), 'l2': float(self.l2)}
+
+
+def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
     # f : \theta --> M
     atm = keras.Input(shape=(3,), name='atm_params')
     x = atm
@@ -320,8 +389,16 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=8):
         n_bands,
         use_bias=False,
         #kernel_constraint=keras.constraints.NonNeg(), # TODO: Relax (esp. for colors)?
+        #kernel_constraint=ReddeningConstraint(),
+        kernel_regularizer=ReddeningRegularizer(l1=0.1),
         name='extinction_reddening'
     )(red)
+
+    #B = np.identity(n_bands, dtype='f4')
+    #B[1:,0] = -1.
+    #B = tf.constant(B)
+    #B = K.reshape(B, (-1, n_bands, n_bands))
+    #ext_red = keras.layers.Dot((1,1), name='ext_red')([B, ext])
 
     y = keras.layers.Add(name='reddened_mag_color')([mag_color, ext_red])
 
@@ -408,7 +485,8 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
     test_pred['y_resid'] = io_test['y'] - test_pred['y']
 
     # Get the extinction vector
-    R = nn_model.get_layer('extinction_reddening').get_weights()[0][0]
+    R = extract_R(nn_model)
+    #R = nn_model.get_layer('extinction_reddening').get_weights()[0][0]
     R[1:] += R[0]
     print('Extinction/reddening vector:', R)
 
@@ -486,6 +564,8 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
 
     def get_lim(*args, **kwargs):
         expand = kwargs.get('expand', 0.4)
+        expand_low = kwargs.get('expand_low', expand)
+        expand_high = kwargs.get('expand_high', expand)
         pct = kwargs.get('pct', 1.)
         lim = [np.inf, -np.inf]
         for a in args:
@@ -493,8 +573,8 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
             lim[0] = min(a0, lim[0])
             lim[1] = max(a1, lim[1])
         w = lim[1] - lim[0]
-        lim[0] -= expand*w
-        lim[1] += expand*w
+        lim[0] -= expand_low * w
+        lim[1] += expand_high * w
         return lim
 
     labels = ['G', 'BP', 'RP', 'g', 'r', 'i', 'z', 'y']
@@ -529,9 +609,13 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
             idx_colors_obs.append(idx_goodobs[i1] & idx_goodobs[i2])
             E_vec.append(0.25 * (R[i1] - R[i2]))
 
-        mag_lim = get_lim(mag_obs[idx_goodobs[ps['mag']]], pct=2.)[::-1]
+        mag_lim = get_lim(
+            mag_obs[idx_goodobs[ps['mag']]],
+            pct=2.
+        )[::-1]
         color_lim = [
-            get_lim(c[idx_colors_obs[k]]) for k,c in enumerate(colors_obs)
+            get_lim(c[idx_colors_obs[k]], expand_low=0.5, expand_high=0.3)
+            for k,c in enumerate(colors_obs)
         ]
         
         for p in params.keys():
@@ -762,6 +846,10 @@ def main():
     # Load stellar data
     print('Loading data ...')
     fnames = glob('data/combined_data_*to*.h5')
+    #fnames = [
+    #    'data/combined_data_00to30.h5',
+    #    'data/combined_data_30to60.h5',
+    #]
     d,b19,b19_err = load_data(fnames)
     d = collapse_atm_params(d, b19, b19_err)
 
@@ -771,7 +859,7 @@ def main():
     (d_train,), (d_test,) = split_dataset(0.9, d)
 
     # Load/create neural network
-    nn_name = 'combined_rerr'
+    nn_name = 'constraint'
     n_hidden = 2
     nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
     #nn_model = keras.models.load_model(
@@ -780,7 +868,7 @@ def main():
     nn_model.summary()
 
     # Iteratively update dM/dtheta contribution to uncertainties, and retrain
-    n_iterations = 10
+    n_iterations = 20
 
     for k in range(n_iterations):
         # Transform data to inputs and outputs
@@ -804,6 +892,7 @@ def main():
         K.set_value(nn_model.optimizer.lr, lr)
         
         # Train the model
+        print('Iteration {} of {}.'.format(k+1, n_iterations))
         train_model(
             nn_model,
             io_train,
