@@ -5,12 +5,16 @@ from __future__ import print_function, division
 import numpy as np
 import scipy.stats
 import h5py
+
 import tensorflow as tf
 from tensorflow import keras
 import tensorflow.keras.backend as K
+from tensorflow.python.ops import math_ops
+
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from glob import glob
+import json
 
 
 def load_data(fnames):
@@ -31,7 +35,7 @@ def load_data(fnames):
     b19_err = np.hstack(b19_err)
 
     # Add error floor into magnitude uncertainties
-    err_floor = 0.02
+    err_floor = 0.01
     d['ps1_mag_err'] = np.sqrt(d['ps1_mag_err']**2 + err_floor**2)
     for b in 'JHK':
         d['tmass_{}_mag_err'.format(b)] = np.sqrt(
@@ -46,7 +50,7 @@ def load_data(fnames):
         )
 
     # Add error floor into reddening uncertainties
-    r_err_floor = 0.05
+    r_err_floor = 0.01
     r_err_scale = 0.10
     b19_err = np.sqrt(
           b19_err**2
@@ -191,6 +195,7 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
     if pretrained_model is not None:
         J = calc_dmag_color_dtheta(pretrained_model, x_p)
         cov_x = np.zeros((x.shape[0],3,3), dtype='f4')
+        # TODO: Off-diagonal terms of C_theta
         cov_x[:,0,0] = (d['teff_err'] / norm['x']._sigma[0])**2
         cov_x[:,1,1] = (d['logg_err'] / norm['x']._sigma[1])**2
         cov_x[:,2,2] = (d['feh_err'] / norm['x']._sigma[2])**2
@@ -204,10 +209,20 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
 
     # Subtract distance modulus from m_G
     dm = -5. * (np.log10(d['parallax']) - 2.)
+    dm_corr = 0.5 * err_over_plx**2 + 0.75 * err_over_plx**4
+
+    dm_corr_pct = np.percentile(dm_corr, [1., 5., 10., 50., 90., 95., 99.])
+    print(dm_corr_pct)
+
+    dm = 10. - 5.*np.log10(d['parallax']) + 5./np.log(10.)*dm_corr
     y[:,0] -= dm
 
-    # Don't attempt to predict M_G when plx/err < 4 or plx < 0
-    idx = (err_over_plx > 0.25) | (d['parallax'] < 1.e-5)
+    # Don't attempt to predict M_G for poor plx/err or when plx < 0
+    idx = (err_over_plx > 0.1) | (d['parallax'] < 1.e-8)
+    n_use = idx.size - np.count_nonzero(idx)
+    print(r'Using {:d} of {:d} ({:.3f}%) of stellar parallaxes.'.format(
+        n_use, idx.size, n_use/idx.size*100.
+    ))
     cov_y[idx,0,0] = 100.**2#np.inf
     y[idx,0] = 0.
 
@@ -232,7 +247,7 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
 
         # Clip mean and variance of reddenings
         r_pred = np.clip(r_pred, 0., 10.) # TODO: Update upper limit?
-        r_var = np.clip(r_var, 0.05**2, 10.**2)
+        r_var = np.clip(r_var, 0.01**2, 10.**2)
 
         r[:] = r_pred
         
@@ -279,6 +294,24 @@ def predict_y(nn_model, x_p):
     return y
 
 
+def save_predictions(fname, nn_model, d_test, io_test):
+    y_pred = predict_y(nn_model, io_test['x_p'])
+    R = extract_R(nn_model)
+    
+    with h5py.File(fname, 'w') as f:
+        f.create_dataset('/data', data=d_test, chunks=True,
+                         compression='gzip', compression_opts=3)
+        f.create_dataset('/y_obs', data=io_test['y'], chunks=True,
+                         compression='gzip', compression_opts=3)
+        f.create_dataset('/cov_y', data=io_test['cov_y'], chunks=True,
+                         compression='gzip', compression_opts=3)
+        f.create_dataset('/reddening', data=io_test['r'], chunks=True,
+                         compression='gzip', compression_opts=3)
+        f.create_dataset('/y_pred', data=y_pred, chunks=True,
+                         compression='gzip', compression_opts=3)
+        f.attrs['R'] = R
+
+
 def extract_R(nn_model):
     R = nn_model.get_layer('extinction_reddening').get_weights()[0][0]
     #R = nn_model.get_layer('extinction').get_weights()[0][0]
@@ -317,34 +350,30 @@ class DataNormalizer(object):
         isig_norm._mu = 0.
         isig_norm._sigma = 1. / self._sigma
         return isig_norm
+    
+    def save(self, fname):
+        d = {
+            'sigma': self._sigma.tolist(),
+            'mu': self._mu.tolist()
+        }
+        with open(fname, 'w') as f:
+            json.dump(d, f)
 
-
-from tensorflow.keras.constraints import Constraint
-from tensorflow.python.ops import math_ops
-
-class ReddeningConstraint(Constraint):
-    def __init__(self):
-        pass
-
-    def __call__(self, w):
-        print('')
-        print('__call__')
-        print(w.shape)
-        print(w)
-        print(w[...,0])
-        w = w * math_ops.cast(
-            #math_ops.greater_equal(w+w[...,0], 0.),
-            math_ops.greater_equal(tf.math.add(w,w[...,0]), 0.),
-            K.floatx()
-        )
-        print(w)
-        print('')
-        return w
+    @classmethod
+    def load(cls, fname):
+        with open(fname, 'r') as f:
+            d = json.load(f)
+        c = cls([])
+        c._sigma = np.array(d['sigma'])
+        c._mu = np.array(d['mu'])
+        return c
 
 
 class ReddeningRegularizer(keras.regularizers.Regularizer):
     """
-    Regularizer that punishes negative entries in the reddening vector.
+    Kernel regularizer that punishes negative entries in the
+    reddening vector. Adapted from tf.keras.regularizers.L1L2.
+
     Arguments:
         l1: Float; L1 regularization factor.
         l2: Float; L2 regularization factor.
@@ -358,12 +387,17 @@ class ReddeningRegularizer(keras.regularizers.Regularizer):
         if not self.l1 and not self.l2:
             return K.constant(0.)
         regularization = 0.
+        # Convert from reddening to extinction vector, assuming that
+        # the weights x represent (G, X1-G, X2-G, X3-G, ...). This
+        # operation turns x into (G+G, X1, X2, X3, ...). The first
+        # entry is 2G instead of G, but the G component never goes
+        # negative in practice.
         x = tf.math.add(x, x[...,0])
-        #x = tf.clip_by_value(x, clip_value_max=0.)
+        # Only penalize negative values
         x = tf.math.minimum(x, 0.)
-        if self.l1:
+        if self.l1: # 1-norm regularization
             regularization += self.l1 * math_ops.reduce_sum(math_ops.abs(x))
-        if self.l2:
+        if self.l2: # 2-norm regularization
             regularization += self.l2 * math_ops.reduce_sum(math_ops.square(x))
         return regularization
 
@@ -388,8 +422,6 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
     ext_red = keras.layers.Dense(
         n_bands,
         use_bias=False,
-        #kernel_constraint=keras.constraints.NonNeg(), # TODO: Relax (esp. for colors)?
-        #kernel_constraint=ReddeningConstraint(),
         kernel_regularizer=ReddeningRegularizer(l1=0.1),
         name='extinction_reddening'
     )(red)
@@ -453,7 +485,7 @@ def train_model(nn_model, io_train, epochs=100, checkpoint_fn='checkpoint'):
     nn_model.fit(
         inputs, outputs,
         epochs=epochs,
-        validation_split=0.25,
+        validation_split=0.25/0.9,
         callbacks=callbacks
     )
 
@@ -614,7 +646,7 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
             pct=2.
         )[::-1]
         color_lim = [
-            get_lim(c[idx_colors_obs[k]], expand_low=0.5, expand_high=0.3)
+            get_lim(c[idx_colors_obs[k]], expand_low=0.5, expand_high=0.4)
             for k,c in enumerate(colors_obs)
         ]
         
@@ -757,12 +789,14 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
             ax_obs.set_xlabel(color_labels[0], fontsize=14)
             ax_obs.set_ylabel(color_labels[1], fontsize=14)
             ax_obs.grid('on', alpha=0.3)
+            ax_obs.set_title(r'$\mathrm{Observed}$')
 
             im = scatter_or_hexbin(
                 ax_pred,
-                colors_pred[0],
-                colors_pred[1],
-                c,
+                colors_pred[0][idx],
+                colors_pred[1][idx],
+                c if c is None else c[idx],
+                #c,
                 vmin, vmax,
                 extent
             )
@@ -770,12 +804,14 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
             ax_pred.set_ylim(color_lim[1])
             ax_pred.set_xlabel(color_labels[0], fontsize=14)
             ax_pred.grid('on', alpha=0.3)
+            ax_pred.set_title(r'$\mathrm{Predicted}$')
 
             im = scatter_or_hexbin(
                 ax_dered,
-                colors_pred_dered[0],
-                colors_pred_dered[1],
-                c,
+                colors_pred_dered[0][idx],
+                colors_pred_dered[1][idx],
+                c if c is None else c[idx],
+                #c,
                 vmin, vmax,
                 extent
             )
@@ -783,6 +819,7 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
             ax_dered.set_ylim(color_lim[1])
             ax_dered.set_xlabel(color_labels[0], fontsize=14)
             ax_dered.grid('on', alpha=0.3)
+            ax_dered.set_title(r'$\mathrm{Predicted+Dereddened}$')
 
             ax_dered.annotate(
                 '',
@@ -827,6 +864,7 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
         fontsize=14
     )
     fig.savefig('plots/test_dE'+suff+'.svg', dpi=150)
+    plt.close(fig)
 
 
 def calc_dmag_color_dtheta(nn_model, x_p):
@@ -846,10 +884,8 @@ def main():
     # Load stellar data
     print('Loading data ...')
     fnames = glob('data/combined_data_*to*.h5')
-    #fnames = [
-    #    'data/combined_data_00to30.h5',
-    #    'data/combined_data_30to60.h5',
-    #]
+    #fnames = ['data/combined_data_00to30.h5']
+    fnames.sort()
     d,b19,b19_err = load_data(fnames)
     d = collapse_atm_params(d, b19, b19_err)
 
@@ -857,18 +893,20 @@ def main():
     # Fix random seed (same split every run)
     np.random.seed(7)
     (d_train,), (d_test,) = split_dataset(0.9, d)
+    np.random.shuffle(d_train) # Want d_train to be in random order
 
     # Load/create neural network
-    nn_name = 'constraint'
+    nn_name = 'dmfix2'
     n_hidden = 2
     nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
     #nn_model = keras.models.load_model(
-    #    'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden)
+    #    'models/{:s}_{:d}hidden_it7.h5'.format(nn_name, n_hidden),
+    #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
     #)
     nn_model.summary()
 
     # Iteratively update dM/dtheta contribution to uncertainties, and retrain
-    n_iterations = 20
+    n_iterations = 30
 
     for k in range(n_iterations):
         # Transform data to inputs and outputs
@@ -879,6 +917,7 @@ def main():
             d_train,
             pretrained_model=None if k == 0 else nn_model
         )
+        normalizers['x'].save('data/normalizer_x.json')
         io_test,_ = get_inputs_outputs(
             d_test,
             normalizers=normalizers,
@@ -896,7 +935,7 @@ def main():
         train_model(
             nn_model,
             io_train,
-            epochs=50,
+            epochs=25,
             checkpoint_fn='{:s}_{:d}hidden_it{:d}'.format(
                 nn_name, n_hidden, k
             )
@@ -907,7 +946,8 @@ def main():
             )
         )
         #nn_model = keras.models.load_model(
-        #    'models/{:s}_{:d}hidden_it{:d}.h5'.format(nn_name, n_hidden, k)
+        #    'models/{:s}_{:d}hidden_it{:d}.h5'.format(nn_name, n_hidden, k),
+        #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
         #)
 
         # Plot initial results
@@ -918,6 +958,11 @@ def main():
             normalizers,
             suffix='{:s}_{:d}hidden_it{:d}'.format(nn_name, n_hidden, k)
         )
+
+    fname = 'data/predictions_{:s}_{:d}hidden_it{:d}.h5'.format(
+        nn_name, n_hidden, n_iterations-1
+    )
+    save_predictions(fname, nn_model, d_test, io_test)
 
     return 0
 
