@@ -85,10 +85,15 @@ def save_bayestar(which, E0, sigma_E):
 def main():
     q_b19 = BayestarQuery(version='bayestar2019', max_samples=4)
 
-    name = 'combined_data_30to60'
-    d = load_data(name)
-    E0, sigma_E = query_reddening(q_b19, d)
-    save_bayestar(name, E0, sigma_E)
+    #name = 'combined_data_60to90'
+    names = [f'dr16_data_{l0}to{l0+10}' for l0 in range(100,191,10)]
+    names += [f'ddpayne_data_{l0}to{l0+10}' for l0 in range(100,191,10)]
+    print(names)
+    for name in names:
+        print(f'Adding reddenings to {name} ...')
+        d = load_data(name)
+        E0, sigma_E = query_reddening(q_b19, d)
+        save_bayestar(name, E0, sigma_E)
 
     return 0
 
