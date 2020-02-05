@@ -50,8 +50,8 @@ def load_data(fnames):
         )
 
     # Add error floor into reddening uncertainties
-    r_err_floor = 0.01
-    r_err_scale = 0.10
+    r_err_floor = 0.1#0.01
+    r_err_scale = 0.5#0.10
     b19_err = np.sqrt(
           b19_err**2
         + r_err_floor**2
@@ -128,7 +128,9 @@ def get_corr_matrix(cov):
     return rho
 
 
-def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
+def get_inputs_outputs(d, normalizers=None,
+                          pretrained_model=None,
+                          rchisq_max=None):
     n_bands = 13 # Gaia (G, BP, RP), PS1 (grizy), 2MASS (JHK), unWISE (W1,W2)
 
     # Stellar spectroscopic parameters
@@ -158,11 +160,6 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
     #idx_y_bad = np.isnan(y) # Replace NaN magnitudes with zero
     #y[idx_y_bad] = 0.
 
-    # Replace NaN magnitudes with median (in each band)
-    for b in range(n_bands):
-        idx = ~np.isfinite(y[:,b])
-        y[idx,b] = np.median(y[~idx,b])
-
     # Covariance of y
     cov_y = np.zeros((d.size,n_bands,n_bands), dtype='f4')
 
@@ -179,6 +176,13 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
 
     idx = ~np.isfinite(cov_y) # Replace NaN errors with large number
     cov_y[idx] = 100.**2.
+
+    # Replace NaN magnitudes with median (in each band)
+    for b in range(n_bands):
+        idx = ~np.isfinite(y[:,b])
+        y[idx,b] = np.median(y[~idx,b])
+        # Also set corresponding variances to large number
+        cov_y[idx,b,b] = 100.**2.
 
     # \delta A
     # \partial M / \partial \theta
@@ -201,6 +205,9 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
         cov_x[:,2,2] = (d['feh_err'] / norm['x']._sigma[2])**2
         dcov_y = np.einsum('nik,nkl,njl->nij', J, cov_x, J)
         cov_y += dcov_y
+
+    # If pretrained model provided, could calculate reduced chi^2
+    # with maximum-likelihood (mu, E) here.
 
     # \delta \mu (must be added in after transformation,
     #             due to possibly infinite terms).
@@ -237,22 +244,53 @@ def get_inputs_outputs(d, normalizers=None, pretrained_model=None):
         # First, need to calculate inv_cov_y
         inv_cov_y = np.stack([np.linalg.inv(c) for c in cov_y])
 
+        # Calculate posterior on reddening
         sigma_r = d['b19_err']
         y_pred = predict_y(pretrained_model, x_p)
         R = extract_R(pretrained_model)
-        r_pred, r_var = update_reddenings(
+        r_pred, r_var, chisq = update_reddenings(
             R, inv_cov_y, y, y_pred,
             r, sigma_r
         )
+        print('chisq =', chisq)
+
+        # Calculate d.o.f. of each star
+        n_dof = np.zeros(d.size, dtype='i4')
+        for k in range(n_bands):
+            n_dof += (cov_y[:,k,k] < 99.**2).astype('i4')
+        print('n_dof =', n_dof)
+
+        # Calculate reduced chi^2 for each star
+        rchisq = chisq / (n_dof - 1.)
+        pct = (0., 1., 10., 50., 90., 99., 100.)
+        rchisq_pct = np.percentile(rchisq[np.isfinite(rchisq)], pct)
+        print('chi^2/dof percentiles:')
+        for p,rc in zip(pct,rchisq_pct):
+            print(rf'  {p:.0f}% : {rc:.3g}')
 
         # Clip mean and variance of reddenings
         r_pred = np.clip(r_pred, 0., 10.) # TODO: Update upper limit?
         r_var = np.clip(r_var, 0.01**2, 10.**2)
 
         r[:] = r_pred
-        
+
         # Reddening uncertainty term in covariance of y
         cov_y += r_var[:,None,None] * np.outer(R, R)[None,:,:]
+        
+        # Filter on reduced chi^2
+        if rchisq_max is not None:
+            idx = np.isfinite(rchisq) & (rchisq > 0.) & (rchisq < rchisq_max)
+            n_filt = np.count_nonzero(~idx)
+            pct_filt = 100. * n_filt / idx.size
+            print(
+                rf'Filtering {n_filt:d} stars ({pct_filt:.3g}%) ' +
+                rf'based on chi^2/dof > {rchisq_max:.1f}'
+            )
+            x = x[idx]
+            x_p = x_p[idx]
+            r = r[idx]
+            y = y[idx]
+            cov_y = cov_y[idx]
 
     # Cholesky transform of inverse covariance: L L^T = C^(-1).
     LT = []
@@ -319,12 +357,45 @@ def extract_R(nn_model):
 
 
 def update_reddenings(R, inv_cov_y, y_obs, y_pred, r0, sigma_r):
+    """
+    Calculate posterior on reddening of each star, given
+    difference between prediction and observation, and covariance
+    matrix of the difference.
+    
+    Let n = # of bands, k = # of stars.
+
+    Inputs:
+        R (np.ndarray): Shape-(n,) array containing reddening vector.
+        inv_cov_y (np.ndarray): Shape-(k,n,n) array containing
+            covariance matrix of y_obs-y_pred for each star.
+        y_obs (np.ndarray): Shape-(k,n) array containing observed
+            magnitudes & colors for each star.
+        y_pred (np.ndarray): Shape-(k,n) array containing predicted
+            zero-reddening magnitudes & colors for each star.
+        r0 (np.ndarray): Shape-(k,) array containing mean of prior on
+            reddening for each star.
+        sigma_r (np.ndarray): Shape-(k,) array containing std. dev. of
+            prior on reddening for each star.
+
+    Outputs:
+        r_mean (np.ndarray): Shape-(k,) array containing mean posterior
+            reddening of each star.
+        r_var (np.ndarray): Shape-(k,) array containing variance of
+            reddening posterior for each star.
+        chisq (np.ndarray): Shape-(k,) array containing chi^2 of
+            solution for each star.
+    """
     RT_Cinv = np.einsum('i,nij->nj', R.T, inv_cov_y)
     num = r0/sigma_r**2 + np.einsum('ni,ni->n', RT_Cinv, y_obs - y_pred)
     den = np.einsum('ni,i->n', RT_Cinv, R) + 1./sigma_r**2
     r_mean = num / den
     r_var = 1. / den
-    return r_mean, r_var
+
+    # Chi^2
+    dy = y_pred + R[None,:]*r_mean[:,None] - y_obs
+    chisq = np.einsum('ni,nij,nj->n', dy, inv_cov_y, dy)
+
+    return r_mean, r_var, chisq
 
 
 class DataNormalizer(object):
@@ -896,26 +967,37 @@ def main():
     np.random.shuffle(d_train) # Want d_train to be in random order
 
     # Load/create neural network
-    nn_name = 'dmfix2'
+    nn_name = 'rchisqfilt'
     n_hidden = 2
-    nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
-    #nn_model = keras.models.load_model(
-    #    'models/{:s}_{:d}hidden_it7.h5'.format(nn_name, n_hidden),
-    #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
-    #)
+    #nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
+    nn_model = keras.models.load_model(
+        'models/{:s}_{:d}hidden_it5.h5'.format(nn_name, n_hidden),
+        custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
+    )
     nn_model.summary()
 
     # Iteratively update dM/dtheta contribution to uncertainties, and retrain
-    n_iterations = 30
+    n_iterations = 7
 
-    for k in range(n_iterations):
+    rchisq_max_init = 100.
+    rchisq_max_final = 5.
+    rchisq_max = np.exp(np.linspace(
+        np.log(rchisq_max_init),
+        np.log(rchisq_max_final),
+        n_iterations-1
+    ))
+    rchisq_max = [None] + rchisq_max.tolist()
+    print('chi^2/dof = {}'.format(rchisq_max))
+
+    for k in range(6,n_iterations):
         # Transform data to inputs and outputs
         # On subsequent iterations, inflate errors using
         # gradients dM/dtheta from trained model, and derive new
         # estimates of the reddenings of the stars.
         io_train,normalizers = get_inputs_outputs(
             d_train,
-            pretrained_model=None if k == 0 else nn_model
+            pretrained_model=None if k == 0 else nn_model,
+            rchisq_max=rchisq_max[k]
         )
         normalizers['x'].save('data/normalizer_x.json')
         io_test,_ = get_inputs_outputs(
@@ -935,7 +1017,7 @@ def main():
         train_model(
             nn_model,
             io_train,
-            epochs=25,
+            epochs=10,
             checkpoint_fn='{:s}_{:d}hidden_it{:d}'.format(
                 nn_name, n_hidden, k
             )

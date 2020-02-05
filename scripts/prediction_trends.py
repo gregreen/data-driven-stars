@@ -12,7 +12,7 @@ from matplotlib.ticker import AutoMinorLocator
 from plot_utils import correlation_plot
 
 
-fmt = 'png'
+fmt = 'svg'
 
 
 def load_predictions(fname):
@@ -108,27 +108,33 @@ def rchi2_trends(pred):
         plt.close(fig)
 
 
-def residual_trends(pred):
-    # Calculate residuals in (G, G-BP, BP-RP, RP-g, g-r, ...)-space
+def residual_trends(pred, comp_with_G=False):
+    # Calculate residuals in (G, G-BP, BP-RP, RP-g, g-r, ...)-space,
+    # or in (G, BP-G, RP-G, g-G, r-G, ...)-space, depending on whether
+    # comp_with_G is False or True.
     dy = pred['y_obs'] - pred['y_pred_red']
-    dy[:,1:] = dy[:,:-1] - dy[:,1:]
+    if not comp_with_G:
+        dy[:,1:] = dy[:,:-1] - dy[:,1:]
 
     obs = np.empty(dy.shape, dtype='bool')
     obs[:,0] = (pred['cov_y'][:,0,0] < 100.)
     dy_over_err = np.empty_like(dy)
     dy_over_err[:,0] = dy[:,0] / np.sqrt(pred['cov_y'][:,0,0])
     for k in range(1,dy.shape[1]):
-        c = (
-              pred['cov_y'][:,k,k]
-            + pred['cov_y'][:,k-1,k-1]
-            - 2. * pred['cov_y'][:,k,k-1]
-        )
-        #c -= 2. * 0.02**2
-        obs[:,k] = (
-              (pred['cov_y'][:,k,k] < 100.)
-            & (pred['cov_y'][:,k-1,k-1] < 100.)
-        )
-        dy_over_err[:,k] = dy[:,k] / np.sqrt(c)
+        if comp_with_G:
+            dy_over_err[:,k] = dy[:,k] / np.sqrt(pred['cov_y'][:,k,k])
+        else:
+            c = (
+                  pred['cov_y'][:,k,k]
+                + pred['cov_y'][:,k-1,k-1]
+                - 2. * pred['cov_y'][:,k,k-1]
+            )
+            #c -= 2. * 0.02**2
+            obs[:,k] = (
+                  (pred['cov_y'][:,k,k] < 100.)
+                & (pred['cov_y'][:,k-1,k-1] < 100.)
+            )
+            dy_over_err[:,k] = dy[:,k] / np.sqrt(c)
 
     x_fields = [
         ('teff', pred['data']['teff'], r'$T_{\mathrm{eff}}$', (3500.,8500.)),
@@ -137,13 +143,19 @@ def residual_trends(pred):
         ('reddening', pred['reddening'], r'$\mathrm{reddening}$', (0.,1.25))
     ]
 
-    y_bins = np.arange(-4., 4.01, 0.2)
+    y_bins = np.arange(-5., 5.01, 0.2)
 
     bands = ['G', 'BP', 'RP'] + list('grizyJH') + ['K_s','W_1','W_2']
-    y_cols = (
-          [bands[0]]
-        + [f'{b1}-{b2}' for b1,b2 in zip(bands[:-1],bands[1:])]
-    )
+    if comp_with_G:
+        y_cols = (
+              [bands[0]]
+            + [f'{b}-G' for b in bands[1:]]
+        )
+    else:
+        y_cols = (
+              [bands[0]]
+            + [f'{b1}-{b2}' for b1,b2 in zip(bands[:-1],bands[1:])]
+        )
 
     for k,col_label in enumerate(y_cols):
         col_label_simple = col_label.replace('-','').replace('_','')
@@ -176,14 +188,15 @@ def residual_trends(pred):
 
 
 def main():
-    fname = 'data/predictions_dmfix2_2hidden_it29.h5'
+    fname = 'data/predictions_rchisqfilt_2hidden_it6.h5'
     pred = load_predictions(fname)
 
     print('chi^2/nu = {}'.format(np.mean(pred['rchi2'])))
 
     rchi2_hist(pred)
     rchi2_trends(pred)
-    residual_trends(pred)
+    residual_trends(pred, comp_with_G=False)
+    residual_trends(pred, comp_with_G=True)
 
     return 0
 
