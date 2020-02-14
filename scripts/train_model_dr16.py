@@ -819,7 +819,7 @@ def main():
     print(f'{d_test.size: >10d} test stars.')
 
     # Load/create neural network
-    nn_name = 'dr16_ddpayne'
+    nn_name = 'dr16_ddpayne2'
     n_hidden = 2
     nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
     #nn_model = keras.models.load_model(
@@ -830,7 +830,7 @@ def main():
 
     # Iteratively update dM/dtheta contribution to uncertainties,
     # reddening estimates and reduced chi^2 cut, and retrain.
-    n_iterations = 10
+    n_iterations = 15
 
     rchisq_max_init = 100.
     rchisq_max_final = 5.
