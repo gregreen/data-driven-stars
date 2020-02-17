@@ -6,7 +6,14 @@ import numpy as np
 import h5py
 from glob import glob
 
-from train_model_dr16 import get_corr_matrix
+
+def get_corr_matrix(cov):
+    rho = cov.copy()
+    sqrt_cov_diag = np.sqrt(cov[np.diag_indices(cov.shape[0])])
+    rho /= sqrt_cov_diag[:,None]
+    rho /= sqrt_cov_diag[None,:]
+    rho[np.diag_indices(cov.shape[0])] = sqrt_cov_diag
+    return rho
 
 
 def load_data(fnames):
