@@ -88,6 +88,12 @@ def extract_data(d, b19, b19_err):
         io_data['atm_param_cov'][:,0,0] = d['ddpayne_teff_err']**2.
         io_data['atm_param_cov'][:,1,1] = d['ddpayne_logg_err']**2.
         io_data['atm_param_cov'][:,2,2] = d['ddpayne_feh_err']**2.
+    
+    # Add in error floor to atmospheric parameters
+    # TODO: Check what reasonable values are
+    sigma_atm_param_floor = [10., 0.05, 0.05] # (T_eff, logg, [M/H])
+    for i,sig in enumerate(sigma_atm_param_floor):
+        io_data['atm_param_cov'][:,i,i] += sig**2
 
     # Print correlation matrices, for fun
     for i in range(10):

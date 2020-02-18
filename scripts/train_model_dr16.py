@@ -14,6 +14,7 @@ from tensorflow.python.ops import math_ops
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from glob import glob
+from time import time
 import json
 
 
@@ -38,6 +39,7 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
     n_atm_params = 3 # (T_eff, logg, [M/H])
 
     # Stellar spectroscopic parameters
+    print('Fill in stellar atmospheric parameters ...')
     x = np.empty((d.size,3), dtype='f4')
     x[:] = d['atm_param'][:]
 
@@ -45,18 +47,22 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
     x_p = d['atm_param_p'][:]
 
     # Magnitudes
+    print('Fill in stellar magnitudes ...')
     y = np.empty((d.size,n_bands), dtype='f4')
     y[:] = d['mag'][:]
 
     # Covariance of y
+    print('Empty covariance matrix ...')
     cov_y = np.zeros((d.size,n_bands,n_bands), dtype='f4')
 
     # \delta m
+    print('Covariance: \delta m ...')
     for i in range(n_bands):
         cov_y[:,i,i] = d['mag_err'][:,i]**2
 
     # Replace NaN magnitudes with median (in each band).
     # Also set corresponding variances to large number.
+    print('Replace NaN magnitudes ...')
     for b in range(n_bands):
         idx = (
               ~np.isfinite(y[:,b])
@@ -75,14 +81,19 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
     B = np.identity(n_bands, dtype='f4')
     B[1:,0] = -1.
 
+    print('Transform y -> B y ...')
     y = np.einsum('ij,nj->ni', B, y) # y' = B y
-    cov_y = np.einsum('ik,nkl,jl->nij', B, cov_y, B) # C' = B C B^T
+    print('Transform C -> B C B^T ...')
+    #cov_y = np.einsum('ik,nkl,jl->nij', B, cov_y, B) # C' = B C B^T
+    cov_y = np.einsum('nik,jk->nij', cov_y, B)
+    cov_y = np.einsum('ik,nkj->nij', B, cov_y)
 
     # Add in dM/dtheta term
-    # TODO: Off-diagonal elements of theta covariance matrix
     if pretrained_model is not None:
+        print('Calculate J = dM/dtheta ...')
         J = calc_dmag_color_dtheta(pretrained_model, x_p)
         cov_x = d['atm_param_cov_p']
+        print('Covariance: J C_theta J^T ...')
         cov_y += np.einsum('nik,nkl,njl->nij', J, cov_x, J)
 
     # If pretrained model provided, could calculate reduced chi^2
@@ -94,6 +105,7 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
         np.count_nonzero(np.isnan(d['parallax']))
     ))
     err_over_plx = d['parallax_err'] / d['parallax']
+    print('Covariance: DM uncertainty term ...')
     cov_y[:,0,0] += (5./np.log(10.) * err_over_plx)**2.
 
     # Subtract distance modulus from m_G
@@ -102,10 +114,12 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
     #dm_corr_pct = np.percentile(dm_corr, [1., 5., 10., 50., 90., 95., 99.])
     #print(dm_corr_pct)
 
+    print('Estimate DM ...')
     dm = 10. - 5.*np.log10(d['parallax'])# + 5./np.log(10.)*dm_corr
     y[:,0] -= dm
 
     # Don't attempt to predict M_G for poor plx/err or when plx < 0
+    print('Filter out M_G for poor parallax measurements ...')
     idx = (
           (err_over_plx > 0.2)
         | (d['parallax'] < 1.e-8)
@@ -120,6 +134,7 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
     y[idx,0] = np.nanmedian(y[:,0])
 
     # Reddenings
+    print('Copy reddenings ...')
     r = np.empty((d.size,), dtype='f4')
     r[:] = d['r'][:]
 
@@ -128,9 +143,11 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
         # Use provided reddenings as a prior.
 
         # First, need to calculate inv_cov_y
+        print('Invert C_y matrices ...')
         inv_cov_y = np.stack([np.linalg.inv(c) for c in cov_y])
 
         # Calculate posterior on reddening
+        print('Calculate posterior on reddening ...')
         sigma_r = d['r_err']
         y_pred = predict_y(pretrained_model, x_p)
         R = extract_R(pretrained_model)
@@ -141,12 +158,14 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
         print('chisq =', chisq)
 
         # Calculate d.o.f. of each star
+        print('Calculate d.o.f. of each star ...')
         n_dof = np.zeros(d.size, dtype='i4')
         for k in range(n_bands):
             n_dof += (cov_y[:,k,k] < 99.**2).astype('i4')
         print('n_dof =', n_dof)
 
         # Calculate reduced chi^2 for each star
+        print('Calculate chi^2/d.o.f. for each star ...')
         rchisq = chisq / (n_dof - 1.)
         pct = (0., 1., 10., 50., 90., 99., 100.)
         rchisq_pct = np.percentile(rchisq[np.isfinite(rchisq)], pct)
@@ -155,16 +174,19 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
             print(rf'  {p:.0f}% : {rc:.3g}')
 
         # Clip mean and variance of reddenings
+        print('Clip reddenings and reddening variances ...')
         r_pred = np.clip(r_pred, 0., 10.) # TODO: Update upper limit?
         r_var = np.clip(r_var, 0.01**2, 10.**2)
 
         r[:] = r_pred
 
         # Reddening uncertainty term in covariance of y
+        print('Covariance: reddening uncertainty term ...')
         cov_y += r_var[:,None,None] * np.outer(R, R)[None,:,:]
         
         # Filter on reduced chi^2
         if rchisq_max is not None:
+            print('Filter on chi^2/d.o.f. ...')
             idx = np.isfinite(rchisq) & (rchisq > 0.) & (rchisq < rchisq_max)
             n_filt = np.count_nonzero(~idx)
             pct_filt = 100. * n_filt / idx.size
@@ -179,13 +201,18 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
             cov_y = cov_y[idx]
 
     # Cholesky transform of inverse covariance: L L^T = C^(-1).
-    LT = []
-    inv_cov_y = []
+    print('Cholesky transform of each stellar covariance matrix ...')
+    LT = np.empty_like(cov_y)
+    inv_cov_y = np.empty_like(cov_y)
+    #LT = []
+    #inv_cov_y = []
     for k,c in enumerate(cov_y):
         try:
-            ic = np.linalg.inv(c)
-            LT.append(np.linalg.cholesky(ic).T)
-            inv_cov_y.append(ic)
+            inv_cov_y[k] = np.linalg.inv(c)
+            LT[k] = np.linalg.cholesky(inv_cov_y[k].T)
+            #ic = np.linalg.inv(c)
+            #LT.append(np.linalg.cholesky(ic).T)
+            #inv_cov_y.append(ic)
         except np.linalg.LinAlgError as e:
             rho = get_corr_matrix(c)
             print('Offending correlation matrix:')
@@ -202,12 +229,16 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
             print(d['atm_param_cov_p'][k])
             raise e
 
-    LT = np.stack(LT)
-    inv_cov_y = np.stack(inv_cov_y)
+    #print('Stack L^T matrices ...')
+    #LT = np.stack(LT)
+    #print('Stack C^(-1) matrices ...')
+    #inv_cov_y = np.stack(inv_cov_y)
 
     # L^T y
+    print('Calculate L^T y ...')
     LTy = np.einsum('nij,nj->ni', LT, y)
 
+    print('Gather inputs and outputs and return ...')
     inputs_outputs = {
         'x':x, 'x_p':x_p, 'r':r, 'y':y,
         'LT':LT, 'LTy':LTy,
@@ -283,15 +314,25 @@ def update_reddenings(R, inv_cov_y, y_obs, y_pred, r0, sigma_r):
         chisq (np.ndarray): Shape-(k,) array containing chi^2 of
             solution for each star.
     """
+    print('Updating reddenings:')
+    print('  * R^T C_y^(-1) ...')
     RT_Cinv = np.einsum('i,nij->nj', R.T, inv_cov_y)
+    print('  * num = r_0/sigma_r^2 + [R^T C_y^(-1)] dy ...')
     num = r0/sigma_r**2 + np.einsum('ni,ni->n', RT_Cinv, y_obs - y_pred)
+    print('  * den = [R^T C_y^(-1)] R + 1/sigma_r^2 ...')
     den = np.einsum('ni,i->n', RT_Cinv, R) + 1./sigma_r**2
+    print('  * r_mean, r_var ...')
     r_mean = num / den
     r_var = 1. / den
 
     # Chi^2
+    print('  * dy = y_pred + R <r> - y_obs ...')
     dy = y_pred + R[None,:]*r_mean[:,None] - y_obs
-    chisq = np.einsum('ni,nij,nj->n', dy, inv_cov_y, dy)
+    print('  * chi^2: C_y^(-1) dy ...')
+    chisq = np.einsum('nij,nj->ni', inv_cov_y, dy)
+    print('  * chi^2: dy^T [C_y^(-1) dy] ...')
+    chisq = np.einsum('ni,ni->n', dy, chisq)
+    #chisq = np.einsum('ni,nij,nj->n', dy, inv_cov_y, dy)
 
     return r_mean, r_var, chisq
 
@@ -398,10 +439,16 @@ def split_dataset(frac, *args):
     return left, right
 
 
-def train_model(nn_model, io_train, epochs=100, checkpoint_fn='checkpoint'):
+def train_model(nn_model, io_train, epochs=100,
+                checkpoint_fn='checkpoint', batch_size=32):
+    checkpoint_fn = (
+          'checkpoints/'
+        + checkpoint_fn
+        + '.e{epoch:03d}_vl{val_loss:.3f}.h5'
+    )
     callbacks = [
         keras.callbacks.ModelCheckpoint(
-            filepath='checkpoints/'+checkpoint_fn+'.e{epoch:03d}_vl{val_loss:.3f}.h5',
+            filepath=checkpoint_fn,
             save_best_only=True,
             monitor='val_loss',
             verbose=1
@@ -413,7 +460,8 @@ def train_model(nn_model, io_train, epochs=100, checkpoint_fn='checkpoint'):
         inputs, outputs,
         epochs=epochs,
         validation_split=0.25/0.9,
-        callbacks=callbacks
+        callbacks=callbacks,
+        batch_size=batch_size
     )
 
 
@@ -831,6 +879,9 @@ def main():
     # Iteratively update dM/dtheta contribution to uncertainties,
     # reddening estimates and reduced chi^2 cut, and retrain.
     n_iterations = 15
+    
+    # On GPU, use large batch sizes for memory transfer efficiency
+    batch_size = 1024
 
     rchisq_max_init = 100.
     rchisq_max_final = 5.
@@ -847,6 +898,7 @@ def main():
         # On subsequent iterations, inflate errors using
         # gradients dM/dtheta from trained model, and derive new
         # estimates of the reddenings of the stars.
+        t0 = time()
         io_train = get_inputs_outputs(
             d_train,
             pretrained_model=None if k == 0 else nn_model,
@@ -856,6 +908,8 @@ def main():
             d_test,
             pretrained_model=None if k == 0 else nn_model
         )
+        t1 = time()
+        print(f'Time elapsed to prepare data: {t1-t0:.2f} s')
 
         # Set learning rate based on the iteration
         lr = 0.001 * np.exp(-0.2*k)
@@ -865,14 +919,18 @@ def main():
         
         # Train the model
         print('Iteration {} of {}.'.format(k+1, n_iterations))
+        t0 = time()
         train_model(
             nn_model,
             io_train,
             epochs=25,
             checkpoint_fn='{:s}_{:d}hidden_it{:d}'.format(
                 nn_name, n_hidden, k
-            )
+            ),
+            batch_size=batch_size
         )
+        t1 = time()
+        print(f'Time elapsed to train: {t1-t0:.2f} s')
         nn_model.save(
             'models/{:s}_{:d}hidden_it{:d}.h5'.format(
                 nn_name, n_hidden, k
@@ -884,6 +942,8 @@ def main():
         #)
 
         # Plot initial results
+        print('Diagnostic plots ...')
+        t0 = time()
         diagnostic_plots(
             nn_model,
             io_test,
@@ -892,6 +952,8 @@ def main():
             #d_train,
             suffix='{:s}_{:d}hidden_it{:d}'.format(nn_name, n_hidden, k)
         )
+        t1 = time()
+        print(f'Time elapsed to make plots: {t1-t0:.2f} s')
 
     fname = 'data/predictions_{:s}_{:d}hidden_it{:d}.h5'.format(
         nn_name, n_hidden, n_iterations-1
