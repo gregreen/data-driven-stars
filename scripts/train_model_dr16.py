@@ -34,7 +34,9 @@ def get_corr_matrix(cov):
     return rho
 
 
-def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
+def get_inputs_outputs(d, pretrained_model=None,
+                          rchisq_max=None,
+                          return_cov_components=False):
     n_bands = 13 # Gaia (G, BP, RP), PS1 (grizy), 2MASS (JHK), unWISE (W1,W2)
     n_atm_params = 3 # (T_eff, logg, [M/H])
 
@@ -80,13 +82,18 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
     # Transform both y and its covariance
     B = np.identity(n_bands, dtype='f4')
     B[1:,0] = -1.
-
+    
     print('Transform y -> B y ...')
     y = np.einsum('ij,nj->ni', B, y) # y' = B y
     print('Transform C -> B C B^T ...')
     #cov_y = np.einsum('ik,nkl,jl->nij', B, cov_y, B) # C' = B C B^T
     cov_y = np.einsum('nik,jk->nij', cov_y, B)
     cov_y = np.einsum('ik,nkj->nij', B, cov_y)
+    
+    if return_cov_components:
+        cov_comp = {
+            'delta_m': cov_y.copy()
+        }
 
     # Add in dM/dtheta term
     if pretrained_model is not None:
@@ -95,6 +102,9 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
         cov_x = d['atm_param_cov_p']
         print('Covariance: J C_theta J^T ...')
         cov_y += np.einsum('nik,nkl,njl->nij', J, cov_x, J)
+        
+        if return_cov_components:
+            cov_comp['dM/dtheta'] = np.einsum('nik,nkl,njl->nij', J, cov_x, J)
 
     # If pretrained model provided, could calculate reduced chi^2
     # with maximum-likelihood (mu, E) here.
@@ -107,6 +117,10 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
     err_over_plx = d['parallax_err'] / d['parallax']
     print('Covariance: DM uncertainty term ...')
     cov_y[:,0,0] += (5./np.log(10.) * err_over_plx)**2.
+    
+    if return_cov_components:
+        cov_comp['dm'] = np.zeros_like(cov_y)
+        cov_comp['dm'][:,0,0] = (5./np.log(10.) * err_over_plx)**2.
 
     # Subtract distance modulus from m_G
     #dm = -5. * (np.log10(d['parallax']) - 2.)
@@ -132,6 +146,9 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
     ))
     cov_y[idx,0,0] = 99.**2
     y[idx,0] = np.nanmedian(y[:,0])
+    
+    if return_cov_components:
+        cov_comp['dm'][idx,0,0] = 99.**2
 
     # Reddenings
     print('Copy reddenings ...')
@@ -184,6 +201,9 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
         print('Covariance: reddening uncertainty term ...')
         cov_y += r_var[:,None,None] * np.outer(R, R)[None,:,:]
         
+        if return_cov_components:
+            cov_comp['r'] = r_var[:,None,None] * np.outer(R, R)[None,:,:]
+        
         # Filter on reduced chi^2
         if rchisq_max is not None:
             print('Filter on chi^2/d.o.f. ...')
@@ -199,6 +219,10 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
             r = r[idx]
             y = y[idx]
             cov_y = cov_y[idx]
+            
+            if return_cov_components:
+                for key in cov_comp:
+                    cov_comp[key] = cov_comp[key][idx]
 
     # Cholesky transform of inverse covariance: L L^T = C^(-1).
     print('Cholesky transform of each stellar covariance matrix ...')
@@ -244,9 +268,18 @@ def get_inputs_outputs(d, pretrained_model=None, rchisq_max=None):
         'LT':LT, 'LTy':LTy,
         'cov_y':cov_y, 'inv_cov_y':inv_cov_y,
     }
+    
+    if return_cov_components:
+        inputs_outputs['cov_comp'] = cov_comp
+    
+    if pretrained_model is not None:
+        inputs_outputs['r_var'] = r_var
+        inputs_outputs['rchisq'] = rchisq
 
     # Check that there are no NaNs or Infs in results
     for key in inputs_outputs:
+        if isinstance(inputs_outputs[key], dict):
+            continue
         if np.any(~np.isfinite(inputs_outputs[key])):
             raise ValueError(f'NaNs or Infs detected in {key}.')
 
