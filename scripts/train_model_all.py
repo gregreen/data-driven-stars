@@ -39,6 +39,8 @@ def get_inputs_outputs(d, pretrained_model=None,
                           return_cov_components=False):
     n_bands = 13 # Gaia (G, BP, RP), PS1 (grizy), 2MASS (JHK), unWISE (W1,W2)
     n_atm_params = 3 # (T_eff, logg, [M/H])
+    
+    large_err = 999.
 
     # Stellar spectroscopic parameters
     print('Fill in stellar atmospheric parameters ...')
@@ -77,7 +79,7 @@ def get_inputs_outputs(d, pretrained_model=None,
             y0 = 0.
         print(f'Band {b}: {n_bad} of {n_tot} bad. Replacing with {y0:.5f}.')
         y[idx,b] = y0
-        cov_y[idx,b,b] = 99.**2.
+        cov_y[idx,b,b] = large_err**2.
 
     # Transform both y and its covariance
     B = np.identity(n_bands, dtype='f4')
@@ -144,11 +146,11 @@ def get_inputs_outputs(d, pretrained_model=None,
     print(r'Using {:d} of {:d} ({:.3f}%) of stellar parallaxes.'.format(
         n_use, idx.size, n_use/idx.size*100.
     ))
-    cov_y[idx,0,0] = 99.**2
+    cov_y[idx,0,0] = large_err**2
     y[idx,0] = np.nanmedian(y[:,0])
     
     if return_cov_components:
-        cov_comp['dm'][idx,0,0] = 99.**2
+        cov_comp['dm'][idx,0,0] = large_err**2
 
     # Reddenings
     print('Copy reddenings ...')
@@ -178,7 +180,7 @@ def get_inputs_outputs(d, pretrained_model=None,
         print('Calculate d.o.f. of each star ...')
         n_dof = np.zeros(d.size, dtype='i4')
         for k in range(n_bands):
-            n_dof += (cov_y[:,k,k] < 99.**2).astype('i4')
+            n_dof += (cov_y[:,k,k] < (large_err-1.)**2).astype('i4')
         print('n_dof =', n_dof)
 
         # Calculate reduced chi^2 for each star
@@ -192,8 +194,13 @@ def get_inputs_outputs(d, pretrained_model=None,
 
         # Clip mean and variance of reddenings
         print('Clip reddenings and reddening variances ...')
-        r_pred = np.clip(r_pred, -0.25, 10.) # TODO: Update upper limit?
-        r_var = np.clip(r_var, 0.01**2 + (0.1*r_pred)**2, 10.**2)
+        r_pred = np.clip(r_pred, 0., 10.) # TODO: Update upper limit?
+        # TODO: Different lower bounds on error for different sources?
+        #idx = (d['r_source'] == b'default')
+        #print(f'{np.count_nonzero(idx)} stars use default reddening source.')
+        #r_var[idx] = np.clip(r_var[idx], 0.02**2 + (0.1*r_pred[idx])**2, 10.**2)
+        #r_var[~idx] = np.clip(r_var[~idx], 0.02**2, 10.**2)# + (0.1*r_pred[idx])**2, 10.**2)
+        r_var = np.clip(r_var, 0.02**2 + (0.1*r_pred)**2, 10.**2)
 
         r[:] = r_pred
 
@@ -235,7 +242,7 @@ def get_inputs_outputs(d, pretrained_model=None,
     for k,c in enumerate(cov_y):
         try:
             inv_cov_y[k] = np.linalg.inv(c)
-            LT[k] = np.linalg.cholesky(inv_cov_y[k].T)
+            LT[k] = np.linalg.cholesky(inv_cov_y[k]).T
             #ic = np.linalg.inv(c)
             #LT.append(np.linalg.cholesky(ic).T)
             #inv_cov_y.append(ic)
@@ -427,7 +434,7 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
     ext_red = keras.layers.Dense(
         n_bands,
         use_bias=False,
-        kernel_regularizer=ReddeningRegularizer(l1=0.1),
+        kernel_regularizer=ReddeningRegularizer(l1=1.e2),
         name='extinction_reddening'
     )(red)
 
@@ -904,13 +911,13 @@ def main():
     print(f'{d_test.size: >10d} test stars.')
 
     # Load/create neural network
-    nn_name = 'dr16_ddpayne2'
+    nn_name = 'apolamgal'
     n_hidden = 2
-    #nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
-    nn_model = keras.models.load_model(
-        'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden),
-        custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
-    )
+    nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
+    #nn_model = keras.models.load_model(
+    #    'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden),
+    #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
+    #)
     nn_model.summary()
 
     # Iteratively update dM/dtheta contribution to uncertainties,
@@ -930,7 +937,7 @@ def main():
     rchisq_max = [None] + rchisq_max.tolist()
     print('chi^2/dof = {}'.format(rchisq_max))
 
-    for k in range(1, n_iterations):
+    for k in range(0, n_iterations):
         # Transform data to inputs and outputs
         # On subsequent iterations, inflate errors using
         # gradients dM/dtheta from trained model, and derive new
@@ -978,7 +985,7 @@ def main():
         #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
         #)
 
-        # Plot initial results
+        # Plot results on test set
         print('Diagnostic plots ...')
         t0 = time()
         diagnostic_plots(
@@ -992,6 +999,14 @@ def main():
         t1 = time()
         print(f'Time elapsed to make plots: {t1-t0:.2f} s')
 
+    print('Updating covariances and reddening estimates of test dataset ...')
+    t0 = time()
+    io_test = get_inputs_outputs(
+        d_test,
+        pretrained_model=nn_model
+    )
+    t1 = time()
+    print(f'Time elapsed to update covariances and reddenings: {t1-t0:.2f} s')
     fname = 'data/predictions_{:s}_{:d}hidden_it{:d}.h5'.format(
         nn_name, n_hidden, n_iterations-1
     )
