@@ -192,8 +192,8 @@ def get_inputs_outputs(d, pretrained_model=None,
 
         # Clip mean and variance of reddenings
         print('Clip reddenings and reddening variances ...')
-        r_pred = np.clip(r_pred, 0., 10.) # TODO: Update upper limit?
-        r_var = np.clip(r_var, 0.01**2, 10.**2)
+        r_pred = np.clip(r_pred, -0.25, 10.) # TODO: Update upper limit?
+        r_var = np.clip(r_var, 0.01**2 + (0.1*r_pred)**2, 10.**2)
 
         r[:] = r_pred
 
@@ -219,6 +219,8 @@ def get_inputs_outputs(d, pretrained_model=None,
             r = r[idx]
             y = y[idx]
             cov_y = cov_y[idx]
+            r_var = r_var[idx]
+            rchisq = rchisq[idx]
             
             if return_cov_components:
                 for key in cov_comp:
@@ -279,6 +281,8 @@ def get_inputs_outputs(d, pretrained_model=None,
     # Check that there are no NaNs or Infs in results
     for key in inputs_outputs:
         if isinstance(inputs_outputs[key], dict):
+            continue
+        if key == 'rchisq': # Infs appear when d.o.f. = 1
             continue
         if np.any(~np.isfinite(inputs_outputs[key])):
             raise ValueError(f'NaNs or Infs detected in {key}.')
@@ -888,7 +892,7 @@ def calc_dmag_color_dtheta(nn_model, x_p):
 def main():
     # Load stellar data
     print('Loading data ...')
-    fname = 'data/dr16_ddpayne_data.h5'
+    fname = 'data/apogee_lamost_galah_data.h5'
     d = load_data(fname)
 
     # (training+validation) / test split
@@ -902,11 +906,11 @@ def main():
     # Load/create neural network
     nn_name = 'dr16_ddpayne2'
     n_hidden = 2
-    nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
-    #nn_model = keras.models.load_model(
-    #    'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden),
-    #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
-    #)
+    #nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
+    nn_model = keras.models.load_model(
+        'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden),
+        custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
+    )
     nn_model.summary()
 
     # Iteratively update dM/dtheta contribution to uncertainties,
@@ -926,7 +930,7 @@ def main():
     rchisq_max = [None] + rchisq_max.tolist()
     print('chi^2/dof = {}'.format(rchisq_max))
 
-    for k in range(n_iterations):
+    for k in range(1, n_iterations):
         # Transform data to inputs and outputs
         # On subsequent iterations, inflate errors using
         # gradients dM/dtheta from trained model, and derive new
