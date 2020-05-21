@@ -198,8 +198,11 @@ def correlation_plot(ax, x, y,
         a = np.sum(density, axis=1)
         a[a == 0] = 1
         density /= a[:,None]
+        n_occupied = np.count_nonzero(density > 0, axis=1)
+        idx = (n_occupied > 3)
+        print(f'{np.count_nonzero(~idx)} of {idx.size} ruled out.')
         # density[~np.isfinite(density)] = 0.
-        norm = np.percentile(np.max(density, axis=1), 90.)
+        norm = np.nanpercentile(np.nanmax(density, axis=1)[idx], 90.)
         print(np.max(density, axis=1))
         print(norm)
         if norm == 0:
