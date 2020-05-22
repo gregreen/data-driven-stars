@@ -35,6 +35,7 @@ def get_corr_matrix(cov):
 
 
 def get_inputs_outputs(d, pretrained_model=None,
+                          recalc_reddening=False,
                           rchisq_max=None,
                           return_cov_components=False):
     n_bands = 13 # Gaia (G, BP, RP), PS1 (grizy), 2MASS (JHK), unWISE (W1,W2)
@@ -96,7 +97,7 @@ def get_inputs_outputs(d, pretrained_model=None,
         cov_comp = {
             'delta_m': cov_y.copy()
         }
-
+    
     # Add in dM/dtheta term
     if pretrained_model is not None:
         print('Calculate J = dM/dtheta ...')
@@ -156,6 +157,14 @@ def get_inputs_outputs(d, pretrained_model=None,
     print('Copy reddenings ...')
     r = np.empty((d.size,), dtype='f4')
     r[:] = d['r'][:]
+    
+    if pretrained_model is None:
+        # If R has not yet been estimated, then
+        # cut out stars with sigma_r > 0.2 mag.
+        idx = (d['r_err'] > 0.2)
+        print(f'Cutting {np.count_nonzero(idx)} stars with large sigma_r.')
+        for k in range(cov_y.shape[1]):
+            cov_y[idx,k,k] += large_err**2
 
     if pretrained_model is not None:
         # Update reddenings, based on vector R and (y_obs - y_pred).
@@ -170,6 +179,7 @@ def get_inputs_outputs(d, pretrained_model=None,
         sigma_r = d['r_err']
         y_pred = predict_y(pretrained_model, x_p)
         R = extract_R(pretrained_model)
+        print(f'Using R = {R}')
         r_pred, r_var, chisq = update_reddenings(
             R, inv_cov_y, y, y_pred,
             r, sigma_r
@@ -202,6 +212,10 @@ def get_inputs_outputs(d, pretrained_model=None,
         #r_var[~idx] = np.clip(r_var[~idx], 0.02**2, 10.**2)# + (0.1*r_pred[idx])**2, 10.**2)
         r_var = np.clip(r_var, 0.02**2 + (0.1*r_pred)**2, 10.**2)
 
+        if not recalc_reddening:
+            r_pred = r
+            r_var = sigma_r**2
+        
         r[:] = r_pred
 
         # Reddening uncertainty term in covariance of y
@@ -281,7 +295,7 @@ def get_inputs_outputs(d, pretrained_model=None,
     if return_cov_components:
         inputs_outputs['cov_comp'] = cov_comp
     
-    if pretrained_model is not None:
+    if (pretrained_model is not None) & recalc_reddening:
         inputs_outputs['r_var'] = r_var
         inputs_outputs['rchisq'] = rchisq
 
@@ -324,7 +338,14 @@ def save_predictions(fname, nn_model, d_test, io_test):
 
 
 def extract_R(nn_model):
-    R = nn_model.get_layer('extinction_reddening').get_weights()[0][0]
+    R_model = keras.Model(
+        nn_model.get_layer(name='atm_params').input,
+        nn_model.get_layer(name='ext_vec').output
+    )
+    R = R_model.predict(np.array([[0.,0.,0.]]))[0]
+    R[1:] -= R[0]
+    print(nn_model.get_layer('ext_vec').get_weights())
+    #R = nn_model.get_layer('extinction_reddening').get_weights()[0][0]
     #R = nn_model.get_layer('extinction').get_weights()[0][0]
     return R
 
@@ -429,21 +450,54 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
         )(x)
     mag_color = keras.layers.Dense(n_bands, name='mag_color')(x)
 
-    # Extinction/reddening
+    # Reddening measurement E
     red = keras.Input(shape=(1,), name='reddening')
+    #ext_red = keras.layers.Dense(
+    #    n_bands,
+    #    use_bias=False,
+    #    kernel_regularizer=ReddeningRegularizer(l1=1.e2),
+    #    name='extinction_reddening'
+    #)(red)
+    
+    # Extinction vector R, g : \theta --> R
+    ext_vec = keras.layers.Dense(
+        n_bands,
+        use_bias=True,
+        activation='exponential',
+        kernel_regularizer=keras.regularizers.l2(l=1.e8), # TODO: Stronger regularization?
+        name='ext_vec'
+    )(atm)
+    
+    # Extinction A = ER
+    ext = keras.layers.Multiply(name='ext')([red, ext_vec])
+    
+    # Transform extinction to extinction,reddening using B: BA
+    B = np.identity(n_bands, dtype='f4')
+    B[1:,0] = -1.
     ext_red = keras.layers.Dense(
         n_bands,
         use_bias=False,
-        kernel_regularizer=ReddeningRegularizer(l1=1.e2),
-        name='extinction_reddening'
-    )(red)
-
+        trainable=False,
+        weights=[B],
+        #kernel_initializer=get_B_matrix,
+        name='ext_red'
+    )(ext)
+    #ext_red_layer.set_weights([B])
+    #ext_red_layer.trainable = False
+    #ext_red = ext_red_layer(ext)
     #B = np.identity(n_bands, dtype='f4')
     #B[1:,0] = -1.
     #B = tf.constant(B)
     #B = K.reshape(B, (-1, n_bands, n_bands))
+    #ext_red = keras.layers.Lambda(
+    #    lambda x: tf.keras.backend.batch_dot(B, x, axes=(1,1)),
+    #    name='ext_red'
+    #)(ext)
     #ext_red = keras.layers.Dot((1,1), name='ext_red')([B, ext])
 
+    #ext_red = keras.layers.Dot((1,1), name='ext_red')([B, ext])
+
+    # Predicted mag,color, B(M+A)
     y = keras.layers.Add(name='reddened_mag_color')([mag_color, ext_red])
 
     # Cholesky decomposition of inverse covariance matrix, L L^T = C^(-1)
@@ -539,7 +593,7 @@ def diagnostic_plots(nn_model, io_test, d_test, suffix=None):
     R = extract_R(nn_model)
     R[1:] += R[0]
     print(
-          'Extinction/reddening vector: ['
+          'Extinction vector: ['
         + ' '.join(list(map('{:.3f}'.format,R)))
         + ']'
     )
@@ -897,10 +951,23 @@ def calc_dmag_color_dtheta(nn_model, x_p):
 
 
 def main():
+    # Load/create neural network
+    nn_name = 'theta_dep_red'
+    n_hidden = 2
+    nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
+    #nn_model = keras.models.load_model(
+    #    'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden),
+    #    #custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
+    #)
+    nn_model.summary()
+    
+    extract_R(nn_model)
+
     # Load stellar data
     print('Loading data ...')
     fname = 'data/apogee_lamost_galah_data.h5'
     d = load_data(fname)
+    d = d[::5]
 
     # (training+validation) / test split
     # Fix random seed (same split every run)
@@ -909,16 +976,6 @@ def main():
     np.random.shuffle(d_train) # Want d_train to be in random order
     print(f'{d_train.size: >10d} training/validation stars.')
     print(f'{d_test.size: >10d} test stars.')
-
-    # Load/create neural network
-    nn_name = 'apolamgal'
-    n_hidden = 2
-    nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
-    #nn_model = keras.models.load_model(
-    #    'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden),
-    #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
-    #)
-    nn_model.summary()
 
     # Iteratively update dM/dtheta contribution to uncertainties,
     # reddening estimates and reduced chi^2 cut, and retrain.
@@ -946,11 +1003,13 @@ def main():
         io_train = get_inputs_outputs(
             d_train,
             pretrained_model=None if k == 0 else nn_model,
+            recalc_reddening=False,
             rchisq_max=rchisq_max[k]
         )
         io_test = get_inputs_outputs(
             d_test,
-            pretrained_model=None if k == 0 else nn_model
+            pretrained_model=None if k == 0 else nn_model,
+            recalc_reddening=False
         )
         t1 = time()
         print(f'Time elapsed to prepare data: {t1-t0:.2f} s')
@@ -1003,7 +1062,8 @@ def main():
     t0 = time()
     io_test = get_inputs_outputs(
         d_test,
-        pretrained_model=nn_model
+        pretrained_model=nn_model,
+        recalc_reddening=False
     )
     t1 = time()
     print(f'Time elapsed to update covariances and reddenings: {t1-t0:.2f} s')
