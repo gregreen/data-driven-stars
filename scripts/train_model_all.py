@@ -255,6 +255,11 @@ def get_inputs_outputs(d, pretrained_model=None,
     #inv_cov_y = []
     for k,c in enumerate(cov_y):
         try:
+            # Inflate diagonal of cov slightly, to ensure
+            # positive-definiteness
+            c_diag = c[np.diag_indices_from(c)]
+            c[np.diag_indices_from(c)] += 1.e-4 + 1.e-4 * c_diag
+            
             inv_cov_y[k] = np.linalg.inv(c)
             LT[k] = np.linalg.cholesky(inv_cov_y[k]).T
             #ic = np.linalg.inv(c)
@@ -274,7 +279,22 @@ def get_inputs_outputs(d, pretrained_model=None,
             ))
             print('Covariance matrix of (normed) atmospheric parameters:')
             print(d['atm_param_cov_p'][k])
-            raise e
+            if pretrained_model is not None:
+                print(f'Variance of r: {r_var[k]:.8f}')
+            
+            # Inflate errors along the diagonal and try again
+            c_diag = c[np.diag_indices_from(c)]
+            c[np.diag_indices_from(c)] += 0.02 + 0.02 * c_diag
+            rho = get_corr_matrix(c)
+            print('Inflated correlation matrix:')
+            print(np.array2string(
+                rho[:6,:6],
+                formatter={'float_kind':lambda z:'{: >7.4f}'.format(z)}
+            ))
+            
+            inv_cov_y[k] = np.linalg.inv(c)
+            LT[k] = np.linalg.cholesky(inv_cov_y[k]).T
+            #raise e
 
     #print('Stack L^T matrices ...')
     #LT = np.stack(LT)
@@ -464,7 +484,7 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
         n_bands,
         use_bias=True,
         activation='exponential',
-        kernel_regularizer=keras.regularizers.l2(l=1.e8), # TODO: Stronger regularization?
+        kernel_regularizer=keras.regularizers.l2(l=1.e8),
         name='ext_vec'
     )(atm)
     
@@ -478,24 +498,9 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
         n_bands,
         use_bias=False,
         trainable=False,
-        weights=[B],
-        #kernel_initializer=get_B_matrix,
+        weights=[B.T],
         name='ext_red'
     )(ext)
-    #ext_red_layer.set_weights([B])
-    #ext_red_layer.trainable = False
-    #ext_red = ext_red_layer(ext)
-    #B = np.identity(n_bands, dtype='f4')
-    #B[1:,0] = -1.
-    #B = tf.constant(B)
-    #B = K.reshape(B, (-1, n_bands, n_bands))
-    #ext_red = keras.layers.Lambda(
-    #    lambda x: tf.keras.backend.batch_dot(B, x, axes=(1,1)),
-    #    name='ext_red'
-    #)(ext)
-    #ext_red = keras.layers.Dot((1,1), name='ext_red')([B, ext])
-
-    #ext_red = keras.layers.Dot((1,1), name='ext_red')([B, ext])
 
     # Predicted mag,color, B(M+A)
     y = keras.layers.Add(name='reddened_mag_color')([mag_color, ext_red])
@@ -967,7 +972,7 @@ def main():
     print('Loading data ...')
     fname = 'data/apogee_lamost_galah_data.h5'
     d = load_data(fname)
-    d = d[::5]
+    #d = d[::5]
 
     # (training+validation) / test split
     # Fix random seed (same split every run)
@@ -1003,13 +1008,13 @@ def main():
         io_train = get_inputs_outputs(
             d_train,
             pretrained_model=None if k == 0 else nn_model,
-            recalc_reddening=False,
+            recalc_reddening=True,
             rchisq_max=rchisq_max[k]
         )
         io_test = get_inputs_outputs(
             d_test,
             pretrained_model=None if k == 0 else nn_model,
-            recalc_reddening=False
+            recalc_reddening=True
         )
         t1 = time()
         print(f'Time elapsed to prepare data: {t1-t0:.2f} s')
@@ -1063,7 +1068,7 @@ def main():
     io_test = get_inputs_outputs(
         d_test,
         pretrained_model=nn_model,
-        recalc_reddening=False
+        recalc_reddening=True
     )
     t1 = time()
     print(f'Time elapsed to update covariances and reddenings: {t1-t0:.2f} s')
