@@ -374,9 +374,9 @@ def save_predictions(fname, nn_model, d_test, io_test):
                          compression='gzip', compression_opts=3)
         f.create_dataset('/r_fit', data=io_test['r'], chunks=True,
                          compression='gzip', compression_opts=3)
-        f.create_dataset('/M_pred', data=y_pred, chunks=True,
+        f.create_dataset('/M_pred', data=M_pred, chunks=True,
                          compression='gzip', compression_opts=3)
-        f.create_dataset('/R_pred', data=R, chunks=True,
+        f.create_dataset('/R_pred', data=R_pred, chunks=True,
                         compression='gzip', compression_opts=3)
         f.attrs['R0'] = R0
 
@@ -1005,11 +1005,11 @@ def calc_dmag_color_dtheta(nn_model, x_p):
 
 def main():
     # Load/create neural network
-    nn_name = 'theta_dep_red_recalc'
+    nn_name = 'theta_dep_red_recalc2'
     n_hidden = 2
     nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
     #nn_model = keras.models.load_model(
-    #    'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden),
+    #    'models/{:s}_{:d}hidden_it14.h5'.format(nn_name, n_hidden),
     #    #custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
     #)
     nn_model.summary()
@@ -1060,7 +1060,7 @@ def main():
         io_test = get_inputs_outputs(
             d_test,
             pretrained_model=None if k == 0 else nn_model,
-            recalc_reddening=True
+            recalc_reddening=True,
         )
         t1 = time()
         print(f'Time elapsed to prepare data: {t1-t0:.2f} s')
