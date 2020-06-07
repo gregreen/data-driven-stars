@@ -12,12 +12,15 @@ from matplotlib.gridspec import GridSpec
 
 from corner import corner
 
-from train_model_dr16 import (load_data, get_inputs_outputs,
-                              get_corr_matrix, ReddeningRegularizer)
+from train_model_all import load_data, get_inputs_outputs, get_corr_matrix
+#from train_model_dr16 import (load_data, get_inputs_outputs,
+#                              get_corr_matrix, ReddeningRegularizer)
 from tensorflow import keras
 
+from plot_covariance_ellipses import plot_covariance
 
-def plot_cov(cov, n_draws=10000, axes=None, mu=None, labels=None):
+
+def plot_cov(cov, n_draws=1000, axes=None, mu=None, labels=None):
     n_dim = cov.shape[0]
     assert cov.shape == (n_dim, n_dim)
     
@@ -38,13 +41,19 @@ def plot_cov(cov, n_draws=10000, axes=None, mu=None, labels=None):
         y = y[:,axes]
         y_labels = [y_labels[i] for i in axes]
     
+    kw = {}
+    if np.allclose(y-y0[None,:], np.zeros_like(y)):
+        kw['range'] = [(yy-1., yy+1.) for yy in y0]
+        print('    ~ y = y_0')
+    
     # Corner plot of samples
     fig = corner(
         y,
         labels=y_labels,
         show_titles=True,
         alpha=0.,
-        title_fmt='.3f'
+        title_fmt='.3f',
+        **kw
     )
     
     return fig
@@ -71,18 +80,18 @@ def main():
     #print(cov)
     
     print('Loading data ...')
-    fname = 'data/dr16_ddpayne_data.h5'
+    fname = 'data/apogee_lamost_galah_data.h5'
     d = load_data(fname)
     
     np.random.shuffle(d) # Want d to be in random order
     d = d[:1000] # Select random subset of stars
     
     print('Loading model ...')
-    nn_name = 'dr16_ddpayne2'
+    nn_name = 'theta_dep_red_recalc2'
     n_hidden = 2
     nn_model = keras.models.load_model(
         'models/{:s}_{:d}hidden_it0.h5'.format(nn_name, n_hidden),
-        custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
+        #custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
     )
     
     print('Calculating covariance matrices ...')
@@ -104,6 +113,45 @@ def main():
     
     for n,i in enumerate(idx):
         print(f' - {n} (of {len(idx)})')
+        
+        y0 = io_dict['y'][i]
+        
+        cov_labels = [
+            r'$\mathrm{total}$',
+            r'$\left( \delta_{\theta} \cdot \nabla_{\theta} \right) \vec{M}$',
+            r'$\hat{E} \left( \delta_{\theta} \cdot \nabla_{\theta} \right) \vec{R}$',
+            r'$\delta E \vec{R}$',
+            r'$\delta \mu$',
+            r'$\delta \vec{m}$'
+        ]
+        cov_list = [
+            io_dict['cov_y'][i],
+            io_dict['cov_comp']['dM/dtheta'][i],
+            io_dict['cov_comp']['dA/dtheta'][i],
+            io_dict['cov_comp']['r'][i],
+            io_dict['cov_comp']['dm'][i],
+            io_dict['cov_comp']['delta_m'][i]
+        ]
+        dim_labels = labels
+        linestyles = [':'] + ['-'] * (len(cov_labels)-1)
+        fig = plot_covariance(
+            y0, cov_list,
+            cov_labels=cov_labels,
+            dim_labels=dim_labels,
+            linestyles=linestyles
+        )
+        print('Saving figure ...')
+        fig.savefig(f'plots/cov_components_{n:02d}.svg')
+        plt.close(fig)
+        print('   -> done')
+        continue
+        
+        #cov_tmp = io_dict['cov_comp']['dA/dtheta'][i]
+        #rho_tmp = get_corr_matrix(cov_tmp)
+        #print(np.array2string(
+        #    rho_tmp[:6,:6],
+        #    formatter={'float_kind':lambda z:'{: >7.4f}'.format(z)}
+        #))
         
         #sigma_theta = np.sqrt(np.diag(d['atm_param_cov'][i]))
         corr_theta = get_corr_matrix(d['atm_param_cov'][i])
@@ -128,12 +176,24 @@ def main():
                 #+ r'C_{\theta} = '
                 #+ latexify_matrix(d['atm_param_cov'][i])
             ),
-            'delta_m': '$\delta m$'
+            'delta_m': '$\delta m$',
+            'dA/dtheta': (
+                  r'$\mathrm{d}A/\mathrm{d}\theta$' + ' \n '
+                + r'$\theta = ('
+                + ', '.join([f'{x:.2f}' for x in io_dict['x'][i]])
+                + r')$' + ' \n '
+                + r'$\sigma_{\theta} = ('
+                + ', '.join([f'{x:.2f}' for x in sigma_theta])
+                + ')$' + ' \n '
+                + r'$\rho_{01} = ' + f'{corr_theta[0,1]:+.3f}' + r',\ '
+                + r'\rho_{02} = ' + f'{corr_theta[0,2]:+.3f}' + r',\ '
+                + r'\rho_{12} = ' + f'{corr_theta[1,2]:+.3f}$'
+                #+ r'C_{\theta} = '
+                #+ latexify_matrix(d['atm_param_cov'][i])
+            ),
         }
+        
         rchisq_txt = r'$\chi^2/\nu = {:.3f}$'.format(io_dict['rchisq'][i])
-        
-        y0 = io_dict['y'][i]
-        
         fig = plot_cov(io_dict['cov_y'][i], mu=y0, labels=labels)
         fig.suptitle(rchisq_txt, fontsize=22)
         fig.text(0.98, 0.98, f'{n:02d}', ha='right', va='top')

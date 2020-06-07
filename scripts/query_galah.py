@@ -95,7 +95,7 @@ def filter_data(d):
 def main():
     dset_name = 'stellar_phot_spec_ast'
     
-    for l0 in np.arange(90., 350.01, 10.):
+    for l0 in np.arange(0., 350.01, 10.):
         print('l in ({:.0f}, {:.0f})'.format(l0,l0+10))
         
         lon_bounds = (l0, l0+10.-1.e-8)#(60., 70.)#359.99999)
@@ -121,7 +121,7 @@ def main():
         query = (
             "SELECT "
             ""   # Gaia
-            "    gaia.source_id as gaia_source_id, "
+            "    gaia.source_id as gdr2_source_id, "
             "    gaia.ra as ra, gaia.dec as dec, "
             "    gaia.l as gal_l, gaia.b as gal_b, "
             "    gaia.parallax as parallax, "
@@ -139,6 +139,7 @@ def main():
             "    gaia.phot_g_n_obs as gaia_g_n_obs, "
             "    gaia.phot_bp_n_obs as gaia_bp_n_obs, "
             "    gaia.phot_rp_n_obs as gaia_rp_n_obs, "
+            "    gaia.phot_bp_rp_excess_factor as gaia_bp_rp_excess, "
             ""   # SFD
             "    SFD.EBV(gal_l, gal_b) as SFD, "
             ""   # PS1
@@ -189,18 +190,10 @@ def main():
             "    & (ast_chi2 / (ast_n_good_obs - 5.) < 1.44 * np.clip(np.exp(-0.4 * (gaia_g_mag-19.5)), 1., np.inf)) "
             "    & (gaia_g_mag_err < {phot_err_max}) "
             "    & (gaia_g_n_obs > 2) "
+            #"    & ((1.+0.015*(gaia_bp_mag-gaia_rp_mag)**2) < gaia_bp_rp_excess) "
+            #"    & ((1.3+0.06*(gaia_bp_mag-gaia_rp_mag)**2) > gaia_bp_rp_excess) "
             # SFD cut
             "    & (SFD < {SFD_max}) "
-            # GALAH quality flags
-            "    & (flag_cannon == 0) "
-            "    & ( "
-            "          (snr_c1 > {spec_snr_min}) "
-            "        | (snr_c2 > {spec_snr_min}) "
-            "        | (snr_c3 > {spec_snr_min}) "
-            "        | (snr_c4 > {spec_snr_min}) "
-            "      ) "
-            "    & (teff_err > 1.e-5) & (logg_err > 1.e-5) & (feh_err > 1.e-5) "
-            "    & (teff > 1.) & (feh > -10.) & (logg > -5.) "
             # Cut out galaxies
             "    & ~( "
             "           np.any( "
@@ -211,6 +204,16 @@ def main():
             "           ) "
             "         | (tmass_ext_key > 0) "
             "      ) "
+            # GALAH quality flags
+            "    & (flag_cannon == 0) "
+            "    & ( "
+            "          (snr_c1 > {spec_snr_min}) "
+            "        | (snr_c2 > {spec_snr_min}) "
+            "        | (snr_c3 > {spec_snr_min}) "
+            "        | (snr_c4 > {spec_snr_min}) "
+            "      ) "
+            "    & (teff_err > 1.e-5) & (logg_err > 1.e-5) & (feh_err > 1.e-5) "
+            "    & (teff > 1.) & (feh > -10.) & (logg > -5.) "
         ).format(
             spec_snr_min=20.,
             phot_err_max=0.2,

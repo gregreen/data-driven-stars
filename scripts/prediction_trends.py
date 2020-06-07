@@ -12,7 +12,8 @@ from matplotlib.ticker import AutoMinorLocator
 from plot_utils import correlation_plot
 
 
-plot_dir = '/n/fink2/www/ggreen/dd_stellar_models/apolamgal'
+mname = 'theta_dep_red_recalc'
+plot_dir = f'/n/fink2/www/ggreen/dd_stellar_models/{mname}'
 plot_fmts = ('svg', 'png')
 
 
@@ -20,11 +21,11 @@ def load_predictions(fname, add_nonlin_A=False):
     """
     Loads neural network predictions:
         data       - Input data
-        y_obs      - Observed (G, X1-G, X2-G, ...)
-        y_pred     - Predicted (G, X1-G, X2-G, ...)
+        y_obs      - Observed (m_G-dm, m_X1-m_G, m_X2-m_G, ...)
+        M_pred     - Predicted (M_G, M_X1-M_G, M_X2-M_G, ...)
         cov_y      - Covariance for each observation
         reddening  - Inferred reddening of each star
-        R          - Inferred reddening vector
+        R          - Inferred reddening vector for each star
     Returns a dictionary with each of the above elements.
     """
     d = {}
@@ -33,39 +34,14 @@ def load_predictions(fname, add_nonlin_A=False):
     with h5py.File(fname, 'r') as f:
         for key in f.keys():
             d[key] = f[key][:]
-        d['R'] = f.attrs['R'][:]
+        d['R0'] = f.attrs['R0'][:]
     
     # Calculate reddened predictions
-    A = d['reddening'][:,None]*d['R'][None,:]
-    if add_nonlin_A:
-        dA_band = -1. * np.array([
-            0.038, # G
-            0.014, # BP
-            0.014, # RP
-            0.004, # g
-            0.003,
-            0.002,
-            0.001,
-            0.002,
-            0.003, # J
-            0.004,
-            0.001,
-            0.004, # W1
-            0.003
-        ])
-        A[:,0] *= 0.85
-        dA = A**2 * dA_band[None,:]
-        dA[:,1:] -= dA[:,0][:,None]
-        r_range = [0., 0.25, 0.5, 0.75, 1.0]
-        for r0,r1 in zip(r_range[:-1], r_range[1:]):
-            idx = (d['reddening'] > r0) & (d['reddening'] < r1)
-            nsig = A[idx,4] / np.sqrt(d['cov_y'][idx,4,4])
-            print(r1, np.median(nsig))
-        A += dA
-    d['y_pred_red'] = d['y_pred'] + A
+    A = d['r_fit'][:,None] * d['R_pred']
+    d['M_plus_A_pred'] = d['M_pred'] + A
 
     # Calculate chi^2/d.o.f.
-    dy = d['y_pred_red'] - d['y_obs']
+    dy = d['M_plus_A_pred'] - d['y_obs']
 
     icov = np.empty_like(d['cov_y'])
     for k,c in enumerate(d['cov_y']):
@@ -122,7 +98,7 @@ def rchi2_trends(pred, prefix=''):
         ('teff', pred['data']['atm_param'][:,0], r'$T_{\mathrm{eff}}$', (3500.,8500.)),
         ('logg', pred['data']['atm_param'][:,1], r'$\log \left( g \right)$', (0.6,5.4)),
         ('feh', pred['data']['atm_param'][:,2], r'$\left[ \mathrm{Fe} / \mathrm{H} \right]$', (-2.5,0.5)),
-        ('reddening', pred['reddening'], r'$\mathrm{reddening}$', (0.,1.25))
+        ('reddening', pred['r_fit'], r'$\mathrm{reddening}$', (0.,1.25))
     ]
 
     for key,x,label,lim in x_fields:
@@ -144,7 +120,7 @@ def rchi2_hrd(pred, prefix=''):
     #c = pred['rchi2']
     x = pred['data']['atm_param'][:,0] # T_eff
     yy = (
-        (pred['y_pred'][:,0], r'$M_G$', (-3.,11.)), # M_G
+        (pred['M_pred'][:,0], r'$M_G$', (-3.,11.)), # M_G
         (pred['data']['atm_param'][:,1], r'$\log \left(g\right)$', (-1.0,6.0)), # log(g)
     )
     
@@ -159,14 +135,14 @@ def rchi2_hrd(pred, prefix=''):
     idx_all = np.ones(x.size, dtype='bool')
     spec = [
         ('rchi2', pred['rchi2'], idx_all, r'$\chi^2 / \nu$', (0., 5.), 'viridis'),
-        ('dE', pred['reddening']-pred['data']['r'], idx_all, r'$\mathrm{d}E$', (-0.2, 0.2), 'coolwarm'),
-        ('E', pred['reddening'], idx_all, r'$E$', (0.0, 0.5), 'viridis')
+        ('dE', pred['r_fit']-pred['data']['r'], idx_all, r'$\mathrm{d}E$', (-0.2, 0.2), 'coolwarm'),
+        ('E', pred['r_fit'], idx_all, r'$E$', (0.0, 0.5), 'viridis')
     ]
     
     bands = ['BP', 'RP', 'g', 'r', 'i', 'z', 'y', 'J', 'H', 'K_s', 'W_1', 'W_2']
     for i,b in enumerate(bands):
         idx = (pred['cov_y'][:,i+1,i+1] < 99.)
-        dy = pred['y_obs'][idx,i+1] - pred['y_pred_red'][idx,i+1]
+        dy = pred['y_obs'][idx,i+1] - pred['M_plus_A_pred'][idx,i+1]
         spec.append((
             f'd{b.replace("_","")}G',
             dy,
@@ -195,7 +171,7 @@ def rchi2_hrd(pred, prefix=''):
               (pred['cov_y'][:,i+1,i+1] < 100.)
             & (pred['cov_y'][:,i+2,i+2] < 100.)
         )
-        y0 = (pred['y_pred_red'][:,i+1] - pred['y_pred_red'][:,i+2])
+        y0 = (pred['M_plus_A_pred'][:,i+1] - pred['M_plus_A_pred'][:,i+2])
         y1 = (pred['y_obs'][:,i+1] - pred['y_obs'][:,i+2])
         dy = (y1-y0) / np.sqrt(c)
         spec.append((
@@ -244,7 +220,7 @@ def residual_trends(pred, comp_with_G=False, prefix=''):
     # Calculate residuals in (G, G-BP, BP-RP, RP-g, g-r, ...)-space,
     # or in (G, BP-G, RP-G, g-G, r-G, ...)-space, depending on whether
     # comp_with_G is False or True.
-    dy = pred['y_obs'] - pred['y_pred_red']
+    dy = pred['y_obs'] - pred['M_plus_A_pred']
     if not comp_with_G:
         dy[:,1:] = dy[:,:-1] - dy[:,1:]
 
@@ -273,7 +249,7 @@ def residual_trends(pred, comp_with_G=False, prefix=''):
         ('teff', pred['data']['atm_param'][:,0], r'$T_{\mathrm{eff}}$', (3500.,8500.)),
         ('logg', pred['data']['atm_param'][:,1], r'$\log \left( g \right)$', (0.6,5.4)),
         ('feh', pred['data']['atm_param'][:,2], r'$\left[ \mathrm{Fe} / \mathrm{H} \right]$', (-2.5,0.5)),
-        ('reddening', pred['reddening'], r'$\mathrm{reddening}$', (0.,1.25)),
+        ('reddening', pred['r_fit'], r'$\mathrm{reddening}$', (0.,1.25)),
         ('G', pred['data']['mag'][:,0], r'$m_G$', (10.,19.))
     ]
 
@@ -327,7 +303,7 @@ def residual_trends(pred, comp_with_G=False, prefix=''):
 def select_subset(pred, idx):
     p = {}
     for key in pred:
-        if key == 'R':
+        if key == 'R0':
             p[key] = pred[key]
         else:
             p[key] = pred[key][idx]
@@ -335,7 +311,7 @@ def select_subset(pred, idx):
 
 
 def main():
-    fname = 'data/predictions_apolamgal_2hidden_it14.h5'
+    fname = f'data/predictions_{mname}_2hidden_it14.h5'
     pred = load_predictions(fname, add_nonlin_A=False)
 
     for r_source in [b'all', b'sfd', b'b19', b'default']:
@@ -357,7 +333,7 @@ def main():
             
             print('chi^2/nu = {}'.format(np.median(p['rchi2'])))
             
-            prefix = f'apolamgal_r{r_source.decode()}_atm{atm_source.decode()}_'
+            prefix = f'{mname}_r{r_source.decode()}_atm{atm_source.decode()}_'
             
             rchi2_hrd(p, prefix=prefix)
             #rchi2_hist(pred, prefix=prefix)

@@ -124,18 +124,17 @@ def require_spec_params(d):
 
 
 def filter_data(d):
-    filter_ddpayne(d)
+    #filter_ddpayne(d)
     filter_ps1(d)
     filter_tmass(d)
     filter_unwise(d)
-    d = filter_galaxies(d)
-    d = require_spec_params(d)
+    #d = filter_galaxies(d)
+    #d = require_spec_params(d)
     return d
 
 
 def main():
     dset_name = 'stellar_phot_spec_ast'
-    
     
     for l0 in np.arange(0., 350.01, 10.):
         print('l in ({:.0f}, {:.0f})'.format(l0,l0+10))
@@ -162,7 +161,7 @@ def main():
         query = (
             "SELECT "
             ""   # Gaia
-            "    gaia.source_id as gaia_source_id, "
+            "    gaia.source_id as gdr2_source_id, "
             "    gaia.ra as ra, gaia.dec as dec, "
             "    gaia.l as gal_l, gaia.b as gal_b, "
             "    gaia.parallax as parallax, "
@@ -180,6 +179,7 @@ def main():
             "    gaia.phot_g_n_obs as gaia_g_n_obs, "
             "    gaia.phot_bp_n_obs as gaia_bp_n_obs, "
             "    gaia.phot_rp_n_obs as gaia_rp_n_obs, "
+            "    gaia.phot_bp_rp_excess_factor as gaia_bp_rp_excess, "
             ""   # SFD
             "    SFD.EBV(gal_l, gal_b) as SFD, "
             ""   # LAMOST DDPAYNE
@@ -233,12 +233,47 @@ def main():
             "    tmass(outer, matchedto=gaia, dmax=0.4, nmax=1), "
             "    unwise_obj_primary(outer, matchedto=gaia, dmax=0.4, nmax=1) as unwise "
             "WHERE "
+            # Gaia quality flags
             "    (visibility_periods_used > 8) "
             "    & (ast_chi2 / (ast_n_good_obs - 5.) < 1.44 * np.clip(np.exp(-0.4 * (gaia_g_mag-19.5)), 1., np.inf)) "
             "    & (gaia_g_mag_err < {phot_err_max}) "
             "    & (gaia_g_n_obs > 2) "
+            #"    & ((1.+0.015*(gaia_bp_mag-gaia_rp_mag)**2) < gaia_bp_rp_excess) "
+            #"    & ((1.3+0.06*(gaia_bp_mag-gaia_rp_mag)**2) > gaia_bp_rp_excess) "
+            # SFD cut
             "    & (SFD < {SFD_max}) "
+            # Cut out galaxies
+            "    & ~( "
+            "           np.any( "
+            "              (ps1_mag - ps1_apmag > 0.1) "
+            "            & np.isfinite(ps1_mag) "
+            "            & np.isfinite(ps1_apmag), "
+            "            axis=1 "
+            "           ) "
+            "         | (tmass_ext_key > 0) "
+            "      ) "
+            # DDPayne quality cuts
+            "    & ( "
+            "          (ddpayne_snr_u > spec_snr_min) "
+            "        | (ddpayne_snr_g > spec_snr_min) "
+            "        | (ddpayne_snr_r > spec_snr_min) "
+            "        | (ddpayne_snr_i > spec_snr_min) "
+            "        | (ddpayne_snr_z > spec_snr_min) "
+            "      ) "
+            "    & (ddpayne_qflag_chi2 == b'good') "
+            "    & (ddpayne_flag_singlestar == b'YES') "
+            "    & ( "
+            "          (ddpayne_teff_err > 1.e-5) "
+            "        & (ddpayne_logg_err > 1.e-5) "
+            "        & (ddpayne_feh_err > 1.e-5) "
+            "      ) "
+            "    & ( "
+            "          (ddpayne_teff > 1.) "
+            "        & (ddpayne_feh > -10.) "
+            "        & (ddpayne_logg > -5.) "
+            "      ) "
         ).format(
+            spec_snr_min=20.,
             phot_err_max=0.2,
             SFD_max=5.0
         )
