@@ -103,12 +103,13 @@ def save_bayestar(fname, E0, sigma_E):
 
 
 def main():
-    q_b19 = BayestarQuery(version='bayestar2019', max_samples=4)
+    q_b19 = BayestarQuery(version='bayestar2019')#, max_samples=4)
 
-    #name = 'combined_data_60to90'
-    #names = [f'dr16_data_{l0}to{l0+10}' for l0 in range(100,191,10)]
-    #names += [f'ddpayne_data_{l0}to{l0+10}' for l0 in range(100,191,10)]
-    fnames = glob('data/dr16_data_*to*.h5') + glob('data/ddpayne_data_*to*.h5')
+    fnames = (
+          glob('data/dr16_data_*to*.h5')
+        + glob('data/ddpayne_data_*to*.h5')
+        + glob('data/galah_data_*to*.h5')
+    )
     print(f'{len(fnames):d} files.')
     for fn in fnames:
         print(f'Adding reddenings to {fn} ...')
