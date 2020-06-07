@@ -487,42 +487,6 @@ def calc_chisq(dy, inv_cov_y):
     return chisq
 
 
-class ReddeningRegularizer(keras.regularizers.Regularizer):
-    """
-    Kernel regularizer that punishes negative entries in the
-    reddening vector. Adapted from tf.keras.regularizers.L1L2.
-
-    Arguments:
-        l1: Float; L1 regularization factor.
-        l2: Float; L2 regularization factor.
-    """
-
-    def __init__(self, l1=0., l2=0.):
-        self.l1 = K.cast_to_floatx(l1)
-        self.l2 = K.cast_to_floatx(l2)
-
-    def __call__(self, x):
-        if not self.l1 and not self.l2:
-            return K.constant(0.)
-        regularization = 0.
-        # Convert from reddening to extinction vector, assuming that
-        # the weights x represent (G, X1-G, X2-G, X3-G, ...). This
-        # operation turns x into (G+G, X1, X2, X3, ...). The first
-        # entry is 2G instead of G, but the G component never goes
-        # negative in practice.
-        x = tf.math.add(x, x[...,0])
-        # Only penalize negative values
-        x = tf.math.minimum(x, 0.)
-        if self.l1: # 1-norm regularization
-            regularization += self.l1 * math_ops.reduce_sum(math_ops.abs(x))
-        if self.l2: # 2-norm regularization
-            regularization += self.l2 * math_ops.reduce_sum(math_ops.square(x))
-        return regularization
-
-    def get_config(self):
-        return {'l1': float(self.l1), 'l2': float(self.l2)}
-
-
 def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
     # f : \theta --> M
     atm = keras.Input(shape=(3,), name='atm_params')
@@ -537,12 +501,6 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
 
     # Reddening measurement E
     red = keras.Input(shape=(1,), name='reddening')
-    #ext_red = keras.layers.Dense(
-    #    n_bands,
-    #    use_bias=False,
-    #    kernel_regularizer=ReddeningRegularizer(l1=1.e2),
-    #    name='extinction_reddening'
-    #)(red)
     
     # Extinction vector R, g : \theta --> R
     ext_vec = keras.layers.Dense(
@@ -1056,8 +1014,7 @@ def main():
     n_hidden = 2
     nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
     #nn_model = keras.models.load_model(
-    #    'models/{:s}_{:d}hidden_it14.h5'.format(nn_name, n_hidden),
-    #    #custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
+    #    'models/{:s}_{:d}hidden_it14.h5'.format(nn_name, n_hidden)
     #)
     nn_model.summary()
     
@@ -1138,8 +1095,7 @@ def main():
             )
         )
         #nn_model = keras.models.load_model(
-        #    'models/{:s}_{:d}hidden_it{:d}.h5'.format(nn_name, n_hidden, k),
-        #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
+        #    'models/{:s}_{:d}hidden_it{:d}.h5'.format(nn_name, n_hidden, k)
         #)
 
         # Plot results on test set
