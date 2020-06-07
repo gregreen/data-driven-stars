@@ -175,12 +175,12 @@ def require_spec_params(d):
 
 
 def filter_data(d):
-    filter_sdss(d)
+    #filter_sdss(d)
     filter_ps1(d)
     filter_tmass(d)
     filter_unwise(d)
-    d = filter_galaxies(d)
-    d = require_spec_params(d)
+    #d = filter_galaxies(d)
+    #d = require_spec_params(d)
     return d
 
 
@@ -209,6 +209,7 @@ def main():
         query = (
             "SELECT "
             ""   # Gaia
+            "    gaia.source_id as gdr2_source_id, "
             "    gaia.ra as ra, gaia.dec as dec, "
             "    gaia.l as gal_l, gaia.b as gal_b, "
             "    gaia.parallax as parallax, "
@@ -226,6 +227,7 @@ def main():
             "    gaia.phot_g_n_obs as gaia_g_n_obs, "
             "    gaia.phot_bp_n_obs as gaia_bp_n_obs, "
             "    gaia.phot_rp_n_obs as gaia_rp_n_obs, "
+            "    gaia.phot_bp_rp_excess_factor as gaia_bp_rp_excess, "
             ""   # SFD
             "    SFD.EBV(gal_l, gal_b) as SFD, "
             ""   # SDSS
@@ -276,11 +278,39 @@ def main():
             "    tmass(outer, matchedto=gaia, dmax=0.4, nmax=1), "
             "    unwise_obj_primary(outer, matchedto=gaia, dmax=0.4, nmax=1) as unwise "
             "WHERE "
+            # Gaia quality flags
             "    (visibility_periods_used > 8) "
             "    & (ast_chi2 / (ast_n_good_obs - 5.) < 1.44 * np.clip(np.exp(-0.4 * (gaia_g_mag-19.5)), 1., np.inf)) "
             "    & (gaia_g_mag_err < {phot_err_max}) "
             "    & (gaia_g_n_obs > 2) "
+            #"    & ((1.+0.015*(gaia_bp_mag-gaia_rp_mag)**2) < gaia_bp_rp_excess) "
+            #"    & ((1.3+0.06*(gaia_bp_mag-gaia_rp_mag)**2) > gaia_bp_rp_excess) "
+            # SFD cut
             "    & (SFD < {SFD_max}) "
+            # Cut out galaxies
+            "    & ~( "
+            "           np.any( "
+            "              (ps1_mag - ps1_apmag > 0.1) "
+            "            & np.isfinite(ps1_mag) "
+            "            & np.isfinite(ps1_apmag), "
+            "            axis=1 "
+            "           ) "
+            "         | (tmass_ext_key > 0) "
+            "      ) "
+            # APOGEE quality flags
+            "    & ~(sdss_aspcap_flag & 128).astype('bool') "     # STAR_WARN (bit 7)
+            "    & ~(sdss_aspcap_flag & 8388608).astype('bool') " # STAR_BAD (bit 23)
+            "    & ( "
+            "          (sdss_aspcap_teff_err > 1.e-5) " # T_eff
+            "        & (sdss_aspcap_logg_err > 1.e-5) " # log(g)
+            "        & (sdss_aspcap_m_h_err > 1.e-5)  " # [M/H]
+            "      ) "
+            #"    & (sdss_aspcap_param > -10.) "
+            "    & ( "
+            "          (sdss_aspcap_param[...,0] > 1.)   " # T_eff
+            "        & (sdss_aspcap_param[...,1] > -10.) " # log(g)
+            "        & (sdss_aspcap_param[...,3] > -5.)  " # [M/H]
+            "      ) "
         ).format(
             phot_err_max=0.2,
             SFD_max=5.0
