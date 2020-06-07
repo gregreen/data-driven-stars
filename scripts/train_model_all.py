@@ -11,6 +11,11 @@ from tensorflow import keras
 import tensorflow.keras.backend as K
 from tensorflow.python.ops import math_ops
 
+# Tell Tensorflow not to allocate all GPU memory right away.
+# This is very important in shared environments!
+physical_devices = tf.config.experimental.list_physical_devices('GPU') 
+tf.config.experimental.set_memory_growth(physical_devices[0], True)
+
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from glob import glob
@@ -98,16 +103,16 @@ def get_inputs_outputs(d, pretrained_model=None,
             'delta_m': cov_y.copy()
         }
     
-    # Add in dM/dtheta term
+    # Add in dM/dtheta and dR/dtheta terms
     if pretrained_model is not None:
         print('Calculate J = dM/dtheta ...')
-        J = calc_dmag_color_dtheta(pretrained_model, x_p)
+        J_M = calc_dmag_color_dtheta(pretrained_model, x_p)
         cov_x = d['atm_param_cov_p']
         print('Covariance: J C_theta J^T ...')
-        cov_y += np.einsum('nik,nkl,njl->nij', J, cov_x, J)
+        cov_y += np.einsum('nik,nkl,njl->nij', J_M, cov_x, J_M)
         
         if return_cov_components:
-            cov_comp['dM/dtheta'] = np.einsum('nik,nkl,njl->nij', J, cov_x, J)
+            cov_comp['dM/dtheta'] = np.einsum('nik,nkl,njl->nij', J_M, cov_x, J_M)
 
     # If pretrained model provided, could calculate reduced chi^2
     # with maximum-likelihood (mu, E) here.
@@ -196,6 +201,27 @@ def get_inputs_outputs(d, pretrained_model=None,
         # TODO: Different lower bounds on error for different sources?
         r_var[:] = np.clip(r_var, 0.02**2 + (0.1*r)**2, 10.**2)
         
+        # Reddening uncertainty term in covariance of y
+        print('Covariance: reddening uncertainty term ...')
+        cov_y += r_var[:,None,None] * R[:,:,None]*R[:,None,:]
+        
+        if return_cov_components:
+            cov_comp['r'] = r_var[:,None,None] * R[:,:,None]*R[:,None,:]
+        
+        # Propagate uncertainty in theta to uncertainty in R
+        print('Calculate J = dA/dtheta ...')
+        J_A = calc_dext_red_dtheta(pretrained_model, x_p, r)
+        cov_x = d['atm_param_cov_p']
+        print('Covariance: J C_theta J^T ...')
+        cov_y += np.einsum('nik,nkl,njl->nij', J_A, cov_x, J_A)
+        cov_y += np.einsum('nik,nkl,njl->nij', J_M, cov_x, J_A)
+        cov_y += np.einsum('nik,nkl,njl->nij', J_A, cov_x, J_M)
+        
+        if return_cov_components:
+            cov_comp['dA/dtheta'] = np.einsum('nik,nkl,njl->nij', J_A, cov_x, J_A)
+            cov_comp['dMA/dtheta'] = np.einsum('nik,nkl,njl->nij', J_M, cov_x, J_A)
+            cov_comp['dAM/dtheta'] = np.einsum('nik,nkl,njl->nij', J_A, cov_x, J_M)
+        
         # Calculate chi^2 for each star
         chisq = calc_chisq(M_pred+r[:,None]*R-y, inv_cov_y)
         print('chisq =', chisq)
@@ -215,13 +241,6 @@ def get_inputs_outputs(d, pretrained_model=None,
         print('chi^2/dof percentiles:')
         for p,rc in zip(pct,rchisq_pct):
             print(rf'  {p:.0f}% : {rc:.3g}')
-        
-        # Reddening uncertainty term in covariance of y
-        print('Covariance: reddening uncertainty term ...')
-        cov_y += r_var[:,None,None] * R[:,:,None]*R[:,None,:]
-        
-        if return_cov_components:
-            cov_comp['r'] = r_var[:,None,None] * R[:,:,None]*R[:,None,:]
         
         # Filter on reduced chi^2
         if rchisq_max is not None:
@@ -379,6 +398,16 @@ def save_predictions(fname, nn_model, d_test, io_test):
         f.create_dataset('/R_pred', data=R_pred, chunks=True,
                         compression='gzip', compression_opts=3)
         f.attrs['R0'] = R0
+        
+        if 'cov_comp' in io_test:
+            for key in io_test['cov_comp']:
+                f.create_dataset(
+                    f'/cov_comp/{key.replace(r"/","_")}',
+                    data=io_test['cov_comp'][key],
+                    chunks=True,
+                    compression='gzip',
+                    compression_opts=3
+                )
 
 
 def update_reddenings(M_pred, R, y_obs, inv_cov_y, r0, r_var0):
@@ -1003,9 +1032,27 @@ def calc_dmag_color_dtheta(nn_model, x_p):
     return J
 
 
+def calc_dext_red_dtheta(nn_model, x_p, r):
+    A_model = keras.Model(
+        inputs=[
+            nn_model.get_layer(name='atm_params').input,
+            nn_model.get_layer(name='reddening').input
+        ],
+        outputs=nn_model.get_layer(name='ext_red').output
+    )
+    r = tf.constant(np.reshape(r, (r.size,1)))
+    #r = tf.reshape(r, (tf.size(r), 1))
+    with tf.GradientTape() as g:
+        x_p = tf.constant(x_p)
+        g.watch(x_p)
+        A = A_model([x_p, r])
+    J = g.batch_jacobian(A, x_p).numpy()
+    return J
+
+
 def main():
     # Load/create neural network
-    nn_name = 'theta_dep_red_recalc2'
+    nn_name = 'theta_dep_red'
     n_hidden = 2
     nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
     #nn_model = keras.models.load_model(
@@ -1122,6 +1169,24 @@ def main():
         nn_name, n_hidden, n_iterations-1
     )
     save_predictions(fname, nn_model, d_test, io_test)
+    
+    print('Saving covariance components for small subset of test dataset ...')
+    # Fix random seed (same subset every run)
+    np.random.seed(3)
+    idx = np.arange(d_test.size)
+    np.random.shuffle(idx)
+    idx = idx[:1000]
+    d_comp = d_test[idx]
+    io_comp = get_inputs_outputs(
+        d_comp,
+        pretrained_model=nn_model,
+        recalc_reddening=True,
+        return_cov_components=True
+    )
+    fname = 'data/predictions_{:s}_{:d}hidden_it{:d}_comp.h5'.format(
+        nn_name, n_hidden, n_iterations-1
+    )
+    save_predictions(fname, nn_model, d_comp, io_comp)
 
     return 0
 
