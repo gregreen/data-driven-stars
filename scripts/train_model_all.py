@@ -359,16 +359,16 @@ def predict_M(nn_model, x_p):
     Outputs:
         M (np.ndarray): Shape = (n_stars, n_bands).
     """
-    inputs = nn_model.get_layer(name='atm_params').input
-    outputs = nn_model.get_layer(name='mag_color').output
+    inputs = nn_model.get_layer(name='theta').input
+    outputs = nn_model.get_layer(name='BM').output
     mag_color_model = keras.Model(inputs, outputs)
     M = mag_color_model.predict(x_p)
     return M
 
 
 def predict_R(nn_model, x_p=None):
-    inputs = nn_model.get_layer(name='atm_params').input
-    outputs = nn_model.get_layer(name='ext_vec').output
+    inputs = nn_model.get_layer(name='theta').input
+    outputs = nn_model.get_layer(name='R').output
     R_model = keras.Model(inputs, outputs)
     if x_p is None:
         R = R_model.predict(np.array([[0.,0.,0.]]))[0]
@@ -458,10 +458,6 @@ def update_reddenings(M_pred, R, y_obs, inv_cov_y, r0, r_var0):
     r_mean = num / den
     r_var = 1. / den
 
-    # Chi^2
-    #print('  * dy = y_pred + R <r> - y_obs ...')
-    #dy = y_pred + R[None,:]*r_mean[:,None] - y_obs
-
     return r_mean, r_var
 
 
@@ -488,8 +484,8 @@ def calc_chisq(dy, inv_cov_y):
 
 
 def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
-    # f : \theta --> M
-    atm = keras.Input(shape=(3,), name='atm_params')
+    # Stellar model: B M(theta)
+    atm = keras.Input(shape=(3,), name='theta')
     x = atm
     for i in range(n_hidden_layers):
         x = keras.layers.Dense(
@@ -497,22 +493,22 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
             activation='sigmoid',
             kernel_regularizer=keras.regularizers.l2(l=l2)
         )(x)
-    mag_color = keras.layers.Dense(n_bands, name='mag_color')(x)
+    mag_color = keras.layers.Dense(n_bands, name='BM')(x)
 
     # Reddening measurement E
-    red = keras.Input(shape=(1,), name='reddening')
+    red = keras.Input(shape=(1,), name='E')
     
-    # Extinction vector R, g : \theta --> R
+    # Extinction vector: R(theta)
     ext_vec = keras.layers.Dense(
         n_bands,
         use_bias=True,
         activation='exponential',
         kernel_regularizer=keras.regularizers.l2(l=1.e0),
-        name='ext_vec'
+        name='R'
     )(atm)
     
     # Extinction A = ER
-    ext = keras.layers.Multiply(name='ext')([red, ext_vec])
+    ext = keras.layers.Multiply(name='A')([red, ext_vec])
     
     # Transform extinction to extinction,reddening using B: BA
     B = np.identity(n_bands, dtype='f4')
@@ -522,17 +518,18 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
         use_bias=False,
         trainable=False,
         weights=[B.T],
-        name='ext_red'
+        name='BA'
     )(ext)
 
     # Predicted mag,color, B(M+A)
-    y = keras.layers.Add(name='reddened_mag_color')([mag_color, ext_red])
+    y = keras.layers.Add(name='B_M_plus_A')([mag_color, ext_red])
 
     # Cholesky decomposition of inverse covariance matrix, L L^T = C^(-1)
     LT = keras.Input(shape=(n_bands,n_bands), name='LT')
 
-    # Multiply y by L^T, since loss is given by |L^T (y_pred - y_obs)|^2
-    LTy = keras.layers.Dot((2,1), name='LTy')([LT, y])
+    # Multiply y_pred by L^T, since loss is given by |L^T (y_pred - y_obs)|^2,
+    # where y_pred = B(M+A), and y_obs = B(m-mu).
+    LTy = keras.layers.Dot((2,1), name='LT_B_M_plus_A')([LT, y])
 
     # Compile model
     model = keras.Model(inputs=[atm,red,LT], outputs=LTy)
@@ -598,10 +595,10 @@ def diagnostic_plots(nn_model, io_test, d_test, suffix=None):
         suff = '_' + suffix
     
     inputs = [
-        nn_model.get_layer(name='atm_params').input,
-        nn_model.get_layer(name='reddening').input
+        nn_model.get_layer(name='theta').input,
+        nn_model.get_layer(name='E').input
     ]
-    outputs = nn_model.get_layer(name='reddened_mag_color').output
+    outputs = nn_model.get_layer(name='B_M_plus_A').output
     absmag_model = keras.Model(inputs, outputs)
 
     # Predict y for the test dataset
@@ -979,8 +976,8 @@ def diagnostic_plots(nn_model, io_test, d_test, suffix=None):
 
 def calc_dmag_color_dtheta(nn_model, x_p):
     m = keras.Model(
-        inputs=nn_model.get_layer(name='atm_params').input,
-        outputs=nn_model.get_layer(name='mag_color').output
+        inputs=nn_model.get_layer(name='theta').input,
+        outputs=nn_model.get_layer(name='BM').output
     )
     with tf.GradientTape() as g:
         x_p = tf.constant(x_p)
@@ -993,10 +990,10 @@ def calc_dmag_color_dtheta(nn_model, x_p):
 def calc_dext_red_dtheta(nn_model, x_p, r):
     A_model = keras.Model(
         inputs=[
-            nn_model.get_layer(name='atm_params').input,
-            nn_model.get_layer(name='reddening').input
+            nn_model.get_layer(name='theta').input,
+            nn_model.get_layer(name='E').input
         ],
-        outputs=nn_model.get_layer(name='ext_red').output
+        outputs=nn_model.get_layer(name='BA').output
     )
     r = tf.constant(np.reshape(r, (r.size,1)))
     #r = tf.reshape(r, (tf.size(r), 1))
@@ -1010,7 +1007,7 @@ def calc_dext_red_dtheta(nn_model, x_p, r):
 
 def main():
     # Load/create neural network
-    nn_name = 'theta_dep_red'
+    nn_name = 'test'
     n_hidden = 2
     nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
     #nn_model = keras.models.load_model(
