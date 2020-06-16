@@ -11,112 +11,23 @@ from tensorflow import keras
 import tensorflow.keras.backend as K
 from tensorflow.python.ops import math_ops
 
+# Tell Tensorflow not to allocate all GPU memory right away.
+# This is very important in shared environments!
+physical_devices = tf.config.experimental.list_physical_devices('GPU') 
+tf.config.experimental.set_memory_growth(physical_devices[0], True)
+
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from glob import glob
+from time import time
 import json
 
 
-def load_data(fnames):
-    # Load in all the data files
-    d = []
-    b19 = []
-    b19_err = []
-
-    for fn in fnames:
-        print('Loading {:s} ...'.format(fn))
-        with h5py.File(fn, 'r') as f:
-            d.append(f['stellar_phot_spec_ast'][:])
-            b19.append(f['reddening'][:])
-            b19_err.append(f['reddening_err'][:])
-
-    d = np.hstack(d)
-    b19 = np.hstack(b19)
-    b19_err = np.hstack(b19_err)
-
-    # Add error floor into magnitude uncertainties
-    err_floor = 0.01
-    d['ps1_mag_err'] = np.sqrt(d['ps1_mag_err']**2 + err_floor**2)
-    for b in 'JHK':
-        d['tmass_{}_mag_err'.format(b)] = np.sqrt(
-              d['tmass_{}_mag_err'.format(b)]**2
-            + err_floor**2
-        )
-    d['unwise_mag_err'] = np.sqrt(d['unwise_mag_err']**2 + err_floor**2)
-    for b in ('g', 'bp', 'rp'):
-        d['gaia_'+b+'_mag_err'] = np.sqrt(
-              d['gaia_'+b+'_mag_err']**2
-            + err_floor**2
-        )
-
-    # Add error floor into reddening uncertainties
-    r_err_floor = 0.1#0.01
-    r_err_scale = 0.5#0.10
-    b19_err = np.sqrt(
-          b19_err**2
-        + r_err_floor**2
-        + (r_err_scale*b19_err)**2
-    )
-    
-    # Filter out stars with no reddening estimates
-    idx = np.isfinite(b19)
-    d = d[idx]
-    b19 = b19[idx]
-    b19_err = b19_err[idx]
-
-    return d, b19, b19_err
-
-
-def collapse_atm_params(d, b19, b19_err):
-    dtype = [
-        ('b19', 'f4'),
-        ('b19_err', 'f4'),
-        ('SFD', 'f4'),
-        ('ps1_mag', '5f4'),
-        ('ps1_mag_err', '5f4'),
-        ('tmass_J_mag', 'f4'),
-        ('tmass_H_mag', 'f4'),
-        ('tmass_K_mag', 'f4'),
-        ('tmass_J_mag_err', 'f4'),
-        ('tmass_H_mag_err', 'f4'),
-        ('tmass_K_mag_err', 'f4'),
-        ('unwise_mag', '2f4'),
-        ('unwise_mag_err', '2f4'),
-        ('gaia_g_mag', 'f4'),
-        ('gaia_g_mag_err', 'f4'),
-        ('gaia_bp_mag', 'f4'),
-        ('gaia_bp_mag_err', 'f4'),
-        ('gaia_rp_mag', 'f4'),
-        ('gaia_rp_mag_err', 'f4'),
-        ('parallax', 'f4'),
-        ('parallax_err', 'f4'),
-        ('teff', 'f4'),
-        ('logg', 'f4'),
-        ('feh', 'f4'),
-        ('teff_err', 'f4'),
-        ('logg_err', 'f4'),
-        ('feh_err', 'f4')
-    ]
-    
-    d_simp = np.empty(d.size, dtype=dtype)
-    d_simp['b19'] = b19
-    d_simp['b19_err'] = b19_err
-    for key,_ in dtype[2:-6]:
-        d_simp[key] = d[key]
-
-    for source in ('galah', 'apogee', 'ddpayne'):
-        idx = np.isfinite(d[source+'_teff'])
-        for key,_ in dtype[-6:]:
-            d_simp[key][idx] = d[source+'_'+key][idx]
-
-    idx = (
-          (d_simp['teff_err'] < 200.)
-        & (d_simp['logg_err'] < 0.5)
-        & (d_simp['feh_err'] < 0.5)
-    )
-    d_simp = d_simp[idx]
-
-    return d_simp
+def load_data(fname):
+    print(f'Loading {fname} ...')
+    with h5py.File(fname, 'r') as f:
+        d = f['io_data'][:]
+    return d
 
 
 def get_corr_matrix(cov):
@@ -128,157 +39,214 @@ def get_corr_matrix(cov):
     return rho
 
 
-def get_inputs_outputs(d, normalizers=None,
-                          pretrained_model=None,
-                          rchisq_max=None):
+def get_inputs_outputs(d, pretrained_model=None,
+                          recalc_reddening=False,
+                          rchisq_max=None,
+                          return_cov_components=False):
     n_bands = 13 # Gaia (G, BP, RP), PS1 (grizy), 2MASS (JHK), unWISE (W1,W2)
+    n_atm_params = 3 # (T_eff, logg, [M/H])
+    
+    large_err = 999.
 
     # Stellar spectroscopic parameters
+    print('Fill in stellar atmospheric parameters ...')
     x = np.empty((d.size,3), dtype='f4')
-    x[:,0] = d['teff']
-    x[:,1] = d['logg']
-    x[:,2] = d['feh']
+    x[:] = d['atm_param'][:]
 
-    # Normalize x (zero median, unit variance)
-    if normalizers is None:
-        norm = {'x': DataNormalizer(x)}
-    else:
-        norm = normalizers
-    x_p = norm['x'].normalize(x)
+    x_p = np.empty((d.size,3), dtype='f4')
+    x_p = d['atm_param_p'][:]
 
     # Magnitudes
+    print('Fill in stellar magnitudes ...')
     y = np.empty((d.size,n_bands), dtype='f4')
-    y[:,0] = d['gaia_g_mag']
-    y[:,1] = d['gaia_bp_mag']
-    y[:,2] = d['gaia_rp_mag']
-    y[:,3:8] = d['ps1_mag']
-    y[:,8] = d['tmass_J_mag']
-    y[:,9] = d['tmass_H_mag']
-    y[:,10] = d['tmass_K_mag']
-    y[:,11:13] = d['unwise_mag']
-
-    #idx_y_bad = np.isnan(y) # Replace NaN magnitudes with zero
-    #y[idx_y_bad] = 0.
+    y[:] = d['mag'][:]
 
     # Covariance of y
+    print('Empty covariance matrix ...')
     cov_y = np.zeros((d.size,n_bands,n_bands), dtype='f4')
 
     # \delta m
-    cov_y[:,0,0] += d['gaia_g_mag_err']**2
-    cov_y[:,1,1] += d['gaia_bp_mag_err']**2
-    cov_y[:,2,2] += d['gaia_rp_mag_err']**2
-    for k in range(5):
-        cov_y[:,3+k,3+k] += d['ps1_mag_err'][:,k]**2
-    for k,b in enumerate('JHK'):
-        cov_y[:,8+k,8+k] += d['tmass_{}_mag_err'.format(b)][:]**2
-    for k in range(2):
-        cov_y[:,11+k,11+k] += d['unwise_mag_err'][:,k]**2
+    print('Covariance: \delta m ...')
+    for i in range(n_bands):
+        cov_y[:,i,i] = d['mag_err'][:,i]**2
 
-    idx = ~np.isfinite(cov_y) # Replace NaN errors with large number
-    cov_y[idx] = 100.**2.
-
-    # Replace NaN magnitudes with median (in each band)
+    # Replace NaN magnitudes with median (in each band).
+    # Also set corresponding variances to large number.
+    print('Replace NaN magnitudes ...')
     for b in range(n_bands):
-        idx = ~np.isfinite(y[:,b])
-        y[idx,b] = np.median(y[~idx,b])
-        # Also set corresponding variances to large number
-        cov_y[idx,b,b] = 100.**2.
-
-    # \delta A
-    # \partial M / \partial \theta
+        idx = (
+              ~np.isfinite(y[:,b])
+            | ~np.isfinite(cov_y[:,b,b])
+        )
+        n_bad = np.count_nonzero(idx)
+        n_tot = idx.size
+        y0 = np.median(y[~idx,b])
+        if np.isnan(y0):
+            y0 = 0.
+        print(f'Band {b}: {n_bad} of {n_tot} bad. Replacing with {y0:.5f}.')
+        y[idx,b] = y0
+        cov_y[idx,b,b] = large_err**2.
 
     # Transform both y and its covariance
     B = np.identity(n_bands, dtype='f4')
     B[1:,0] = -1.
-
+    
+    print('Transform y -> B y ...')
     y = np.einsum('ij,nj->ni', B, y) # y' = B y
-    cov_y = np.einsum('ik,nkl,jl->nij', B, cov_y, B) # C' = B C B^T
-
-    # Add in dM/dtheta term
-    # TODO: Off-diagonal elements of theta covariance matrix
+    print('Transform C -> B C B^T ...')
+    #cov_y = np.einsum('ik,nkl,jl->nij', B, cov_y, B) # C' = B C B^T
+    cov_y = np.einsum('nik,jk->nij', cov_y, B)
+    cov_y = np.einsum('ik,nkj->nij', B, cov_y)
+    
+    if return_cov_components:
+        cov_comp = {
+            'delta_m': cov_y.copy()
+        }
+    
+    # Add in dM/dtheta and dR/dtheta terms
     if pretrained_model is not None:
-        J = calc_dmag_color_dtheta(pretrained_model, x_p)
-        cov_x = np.zeros((x.shape[0],3,3), dtype='f4')
-        # TODO: Off-diagonal terms of C_theta
-        cov_x[:,0,0] = (d['teff_err'] / norm['x']._sigma[0])**2
-        cov_x[:,1,1] = (d['logg_err'] / norm['x']._sigma[1])**2
-        cov_x[:,2,2] = (d['feh_err'] / norm['x']._sigma[2])**2
-        dcov_y = np.einsum('nik,nkl,njl->nij', J, cov_x, J)
-        cov_y += dcov_y
+        print('Calculate J = dM/dtheta ...')
+        J_M = calc_dmag_color_dtheta(pretrained_model, x_p)
+        cov_x = d['atm_param_cov_p']
+        print('Covariance: J C_theta J^T ...')
+        cov_y += np.einsum('nik,nkl,njl->nij', J_M, cov_x, J_M)
+        
+        if return_cov_components:
+            cov_comp['dM/dtheta'] = np.einsum('nik,nkl,njl->nij', J_M, cov_x, J_M)
 
     # If pretrained model provided, could calculate reduced chi^2
     # with maximum-likelihood (mu, E) here.
 
     # \delta \mu (must be added in after transformation,
     #             due to possibly infinite terms).
+    print('{:d} NaN parallaxes'.format(
+        np.count_nonzero(np.isnan(d['parallax']))
+    ))
     err_over_plx = d['parallax_err'] / d['parallax']
+    print('Covariance: DM uncertainty term ...')
     cov_y[:,0,0] += (5./np.log(10.) * err_over_plx)**2.
+    
+    if return_cov_components:
+        cov_comp['dm'] = np.zeros_like(cov_y)
+        cov_comp['dm'][:,0,0] = (5./np.log(10.) * err_over_plx)**2.
 
     # Subtract distance modulus from m_G
-    dm = -5. * (np.log10(d['parallax']) - 2.)
-    dm_corr = 0.5 * err_over_plx**2 + 0.75 * err_over_plx**4
+    #dm = -5. * (np.log10(d['parallax']) - 2.)
+    #dm_corr = 0.5 * err_over_plx**2 + 0.75 * err_over_plx**4
+    #dm_corr_pct = np.percentile(dm_corr, [1., 5., 10., 50., 90., 95., 99.])
+    #print(dm_corr_pct)
 
-    dm_corr_pct = np.percentile(dm_corr, [1., 5., 10., 50., 90., 95., 99.])
-    print(dm_corr_pct)
-
-    dm = 10. - 5.*np.log10(d['parallax']) + 5./np.log(10.)*dm_corr
+    print('Estimate DM ...')
+    dm = 10. - 5.*np.log10(d['parallax'])# + 5./np.log(10.)*dm_corr
     y[:,0] -= dm
 
     # Don't attempt to predict M_G for poor plx/err or when plx < 0
-    idx = (err_over_plx > 0.1) | (d['parallax'] < 1.e-8)
+    print('Filter out M_G for poor parallax measurements ...')
+    idx = (
+          (err_over_plx > 0.2)
+        | (d['parallax'] < 1.e-8)
+        | ~np.isfinite(d['parallax'])
+        | ~np.isfinite(d['parallax_err'])
+    )
     n_use = idx.size - np.count_nonzero(idx)
     print(r'Using {:d} of {:d} ({:.3f}%) of stellar parallaxes.'.format(
         n_use, idx.size, n_use/idx.size*100.
     ))
-    cov_y[idx,0,0] = 100.**2#np.inf
-    y[idx,0] = 0.
+    cov_y[idx,0,0] = large_err**2
+    y[idx,0] = np.nanmedian(y[:,0])
+    
+    if return_cov_components:
+        cov_comp['dm'][idx,0,0] = large_err**2
 
     # Reddenings
+    print('Copy reddenings ...')
     r = np.empty((d.size,), dtype='f4')
-    r[:] = d['b19']
+    r[:] = d['r'][:]
+    
+    if pretrained_model is None:
+        # If R has not yet been estimated, then
+        # cut out stars with sigma_r > 0.2 mag.
+        idx = (d['r_err'] > 0.2)
+        print(f'Cutting {np.count_nonzero(idx)} stars with large sigma_r.')
+        for k in range(cov_y.shape[1]):
+            cov_y[idx,k,k] += large_err**2
 
     if pretrained_model is not None:
         # Update reddenings, based on vector R and (y_obs - y_pred).
         # Use provided reddenings as a prior.
 
         # First, need to calculate inv_cov_y
+        print('Invert C_y matrices ...')
         inv_cov_y = np.stack([np.linalg.inv(c) for c in cov_y])
 
+        # Predict M & R for each star based on atm. params
+        M_pred = predict_M(pretrained_model, x_p)
+        R = predict_R(pretrained_model, x_p)
+        
+        r_var = d['r_err']**2
+        
         # Calculate posterior on reddening
-        sigma_r = d['b19_err']
-        y_pred = predict_y(pretrained_model, x_p)
-        R = extract_R(pretrained_model)
-        r_pred, r_var, chisq = update_reddenings(
-            R, inv_cov_y, y, y_pred,
-            r, sigma_r
-        )
+        if recalc_reddening:
+            print('Calculate posterior on reddening ...')
+            r_pred, r_var = update_reddenings(
+                M_pred, R, y,
+                inv_cov_y,
+                r, r_var
+            )
+            
+            # Clip mean and variance of reddenings
+            print('Clip reddenings and reddening variances ...')
+            r[:] = np.clip(r_pred, 0., 10.) # TODO: Update upper limit?
+        
+        # TODO: Different lower bounds on error for different sources?
+        r_var[:] = np.clip(r_var, 0.02**2 + (0.1*r)**2, 10.**2)
+        
+        # Reddening uncertainty term in covariance of y
+        print('Covariance: reddening uncertainty term ...')
+        cov_y += r_var[:,None,None] * R[:,:,None]*R[:,None,:]
+        
+        if return_cov_components:
+            cov_comp['r'] = r_var[:,None,None] * R[:,:,None]*R[:,None,:]
+        
+        # Propagate uncertainty in theta to uncertainty in R
+        print('Calculate J = dA/dtheta ...')
+        J_A = calc_dext_red_dtheta(pretrained_model, x_p, r)
+        cov_x = d['atm_param_cov_p']
+        print('Covariance: J C_theta J^T ...')
+        cov_y += np.einsum('nik,nkl,njl->nij', J_A, cov_x, J_A)
+        cov_y += np.einsum('nik,nkl,njl->nij', J_M, cov_x, J_A)
+        cov_y += np.einsum('nik,nkl,njl->nij', J_A, cov_x, J_M)
+        
+        if return_cov_components:
+            cov_comp['dA/dtheta'] = np.einsum('nik,nkl,njl->nij', J_A, cov_x, J_A)
+            cov_comp['dMA/dtheta'] = np.einsum('nik,nkl,njl->nij', J_M, cov_x, J_A)
+            cov_comp['dAM/dtheta'] = np.einsum('nik,nkl,njl->nij', J_A, cov_x, J_M)
+        
+        # Calculate chi^2 for each star
+        chisq = calc_chisq(M_pred+r[:,None]*R-y, inv_cov_y)
         print('chisq =', chisq)
 
         # Calculate d.o.f. of each star
+        print('Calculate d.o.f. of each star ...')
         n_dof = np.zeros(d.size, dtype='i4')
         for k in range(n_bands):
-            n_dof += (cov_y[:,k,k] < 99.**2).astype('i4')
-        print('n_dof =', n_dof)
+            n_dof += (cov_y[:,k,k] < (large_err-1.)**2).astype('i4')
+        #print('n_dof =', n_dof)
 
         # Calculate reduced chi^2 for each star
+        print('Calculate chi^2/d.o.f. for each star ...')
         rchisq = chisq / (n_dof - 1.)
         pct = (0., 1., 10., 50., 90., 99., 100.)
         rchisq_pct = np.percentile(rchisq[np.isfinite(rchisq)], pct)
         print('chi^2/dof percentiles:')
         for p,rc in zip(pct,rchisq_pct):
             print(rf'  {p:.0f}% : {rc:.3g}')
-
-        # Clip mean and variance of reddenings
-        r_pred = np.clip(r_pred, 0., 10.) # TODO: Update upper limit?
-        r_var = np.clip(r_var, 0.01**2, 10.**2)
-
-        r[:] = r_pred
-
-        # Reddening uncertainty term in covariance of y
-        cov_y += r_var[:,None,None] * np.outer(R, R)[None,:,:]
+        idx_rchisq = (rchisq < 10.)
+        print(f'<chi^2/d.o.f.> = {np.mean(rchisq[idx_rchisq]):.3g}')
         
         # Filter on reduced chi^2
         if rchisq_max is not None:
+            print('Filter on chi^2/d.o.f. ...')
             idx = np.isfinite(rchisq) & (rchisq > 0.) & (rchisq < rchisq_max)
             n_filt = np.count_nonzero(~idx)
             pct_filt = 100. * n_filt / idx.size
@@ -291,50 +259,132 @@ def get_inputs_outputs(d, normalizers=None,
             r = r[idx]
             y = y[idx]
             cov_y = cov_y[idx]
+            r_var = r_var[idx]
+            rchisq = rchisq[idx]
+            
+            if return_cov_components:
+                for key in cov_comp:
+                    cov_comp[key] = cov_comp[key][idx]
 
     # Cholesky transform of inverse covariance: L L^T = C^(-1).
-    LT = []
-    inv_cov_y = []
+    print('Cholesky transform of each stellar covariance matrix ...')
+    LT = np.empty_like(cov_y)
+    inv_cov_y = np.empty_like(cov_y)
     for k,c in enumerate(cov_y):
-        #try:
-        ic = np.linalg.inv(c)
-        LT.append(np.linalg.cholesky(ic).T)
-        inv_cov_y.append(ic)
-        #except np.linalg.LinAlgError as e:
-        #    print(d['teff_err'][k], d['logg_err'][k], d['feh_err'][k])
-        #    rho = get_corr_matrix(c)
-        #    print(np.array2string(
-        #        rho[:6,:6],
-        #        formatter={'float_kind':lambda z:'{: >7.4f}'.format(z)}
-        #    ))
-        #    raise e
+        try:
+            # Inflate diagonal of cov slightly, to ensure
+            # positive-definiteness
+            c_diag = c[np.diag_indices_from(c)]
+            c[np.diag_indices_from(c)] += 1.e-4 + 1.e-3 * c_diag
+            
+            inv_cov_y[k] = np.linalg.inv(c)
+            LT[k] = np.linalg.cholesky(inv_cov_y[k]).T
+            #ic = np.linalg.inv(c)
+            #LT.append(np.linalg.cholesky(ic).T)
+            #inv_cov_y.append(ic)
+        except np.linalg.LinAlgError as e:
+            rho = get_corr_matrix(c)
+            print('Offending correlation matrix:')
+            print(np.array2string(
+                rho[:6,:6],
+                formatter={'float_kind':lambda z:'{: >7.4f}'.format(z)}
+            ))
+            print('Offending covariance matrix:')
+            print(np.array2string(
+                c[:6,:6],
+                formatter={'float_kind':lambda z:'{: >9.6f}'.format(z)}
+            ))
+            print('Covariance matrix of (normed) atmospheric parameters:')
+            print(d['atm_param_cov_p'][k])
+            if pretrained_model is not None:
+                print(f'Variance of r: {r_var[k]:.8f}')
+            
+            # Inflate errors along the diagonal and try again
+            c_diag = c[np.diag_indices_from(c)]
+            c[np.diag_indices_from(c)] += 0.02 + 0.02 * c_diag
+            rho = get_corr_matrix(c)
+            print('Inflated correlation matrix:')
+            print(np.array2string(
+                rho[:6,:6],
+                formatter={'float_kind':lambda z:'{: >7.4f}'.format(z)}
+            ))
+            
+            inv_cov_y[k] = np.linalg.inv(c)
+            LT[k] = np.linalg.cholesky(inv_cov_y[k]).T
+            #raise e
 
-    LT = np.stack(LT)
-    inv_cov_y = np.stack(inv_cov_y)
+    #print('Stack L^T matrices ...')
+    #LT = np.stack(LT)
+    #print('Stack C^(-1) matrices ...')
+    #inv_cov_y = np.stack(inv_cov_y)
 
     # L^T y
+    print('Calculate L^T y ...')
     LTy = np.einsum('nij,nj->ni', LT, y)
 
+    print('Gather inputs and outputs and return ...')
     inputs_outputs = {
         'x':x, 'x_p':x_p, 'r':r, 'y':y,
         'LT':LT, 'LTy':LTy,
         'cov_y':cov_y, 'inv_cov_y':inv_cov_y,
     }
+    
+    if return_cov_components:
+        inputs_outputs['cov_comp'] = cov_comp
+    
+    if pretrained_model is not None:
+        inputs_outputs['r_var'] = r_var
+        inputs_outputs['rchisq'] = rchisq
 
-    return inputs_outputs, norm
+    # Check that there are no NaNs or Infs in results
+    for key in inputs_outputs:
+        if isinstance(inputs_outputs[key], dict):
+            continue
+        if key == 'rchisq': # Infs appear when d.o.f. = 1
+            continue
+        if np.any(~np.isfinite(inputs_outputs[key])):
+            raise ValueError(f'NaNs or Infs detected in {key}.')
+
+    return inputs_outputs
 
 
-def predict_y(nn_model, x_p):
-    inputs = nn_model.get_layer(name='atm_params').input
-    outputs = nn_model.get_layer(name='mag_color').output
+def predict_M(nn_model, x_p):
+    """
+    Predicts (absmag0,color1,color2,...) for input
+    normalized stellar parameters.
+
+    Inputs:
+        nn_model (keras.Model): Neural network model.
+        x_p (np.ndarray): Normalized stellar parameters.
+            Shape = (n_stars, 3).
+    
+    Outputs:
+        M (np.ndarray): Shape = (n_stars, n_bands).
+    """
+    inputs = nn_model.get_layer(name='theta').input
+    outputs = nn_model.get_layer(name='BM').output
     mag_color_model = keras.Model(inputs, outputs)
-    y = mag_color_model.predict(x_p)
-    return y
+    M = mag_color_model.predict(x_p)
+    return M
+
+
+def predict_R(nn_model, x_p=None):
+    inputs = nn_model.get_layer(name='theta').input
+    outputs = nn_model.get_layer(name='R').output
+    R_model = keras.Model(inputs, outputs)
+    if x_p is None:
+        R = R_model.predict(np.array([[0.,0.,0.]]))[0]
+        R[1:] -= R[0]
+    else:
+        R = R_model.predict(x_p)
+        R[:,1:] -= R[:,0][:,None]
+    return R
 
 
 def save_predictions(fname, nn_model, d_test, io_test):
-    y_pred = predict_y(nn_model, io_test['x_p'])
-    R = extract_R(nn_model)
+    M_pred = predict_M(nn_model, io_test['x_p'])
+    R_pred = predict_R(nn_model, io_test['x_p'])
+    R0 = predict_R(nn_model)
     
     with h5py.File(fname, 'w') as f:
         f.create_dataset('/data', data=d_test, chunks=True,
@@ -343,38 +393,54 @@ def save_predictions(fname, nn_model, d_test, io_test):
                          compression='gzip', compression_opts=3)
         f.create_dataset('/cov_y', data=io_test['cov_y'], chunks=True,
                          compression='gzip', compression_opts=3)
-        f.create_dataset('/reddening', data=io_test['r'], chunks=True,
+        f.create_dataset('/r_fit', data=io_test['r'], chunks=True,
                          compression='gzip', compression_opts=3)
-        f.create_dataset('/y_pred', data=y_pred, chunks=True,
+        f.create_dataset('/M_pred', data=M_pred, chunks=True,
                          compression='gzip', compression_opts=3)
-        f.attrs['R'] = R
+        f.create_dataset('/R_pred', data=R_pred, chunks=True,
+                        compression='gzip', compression_opts=3)
+        f.attrs['R0'] = R0
+        
+        if 'cov_comp' in io_test:
+            for key in io_test['cov_comp']:
+                f.create_dataset(
+                    f'/cov_comp/{key.replace(r"/","_")}',
+                    data=io_test['cov_comp'][key],
+                    chunks=True,
+                    compression='gzip',
+                    compression_opts=3
+                )
 
 
-def extract_R(nn_model):
-    R = nn_model.get_layer('extinction_reddening').get_weights()[0][0]
-    #R = nn_model.get_layer('extinction').get_weights()[0][0]
-    return R
-
-
-def update_reddenings(R, inv_cov_y, y_obs, y_pred, r0, sigma_r):
+def update_reddenings(M_pred, R, y_obs, inv_cov_y, r0, r_var0):
     """
-    Calculate posterior on reddening of each star, given
-    difference between prediction and observation, and covariance
-    matrix of the difference.
+    Updates the posterior on reddening of each star, given
+    the predicted absolute magnitudes, reddening vector,
+    observed magnitudes, inverse covariance matrix, and priors on
+    reddening.
+    
+    The model is given by
+    
+        y_obs = M_pred + R r,
+    
+    with the uncertainties in y_obs described by inv_cov_y, and
+    with a prior on r described by (r0, r_var0). We solve for
+    the Gaussian posterior on r: p(r|y_obs,M_pred,R,r0,r_var0).
     
     Let n = # of bands, k = # of stars.
 
     Inputs:
-        R (np.ndarray): Shape-(n,) array containing reddening vector.
+        M_pred (np.ndarray): Shape-(k,n) array containing predicted
+            zero-reddening asbolute magnitude & colors for each star.
+        R (np.ndarray): Shape-(k,n) array containing reddening vector
+            for each star.
         inv_cov_y (np.ndarray): Shape-(k,n,n) array containing
             covariance matrix of y_obs-y_pred for each star.
         y_obs (np.ndarray): Shape-(k,n) array containing observed
-            magnitudes & colors for each star.
-        y_pred (np.ndarray): Shape-(k,n) array containing predicted
-            zero-reddening magnitudes & colors for each star.
+            magnitude (minus distance modulus) & colors for each star.
         r0 (np.ndarray): Shape-(k,) array containing mean of prior on
             reddening for each star.
-        sigma_r (np.ndarray): Shape-(k,) array containing std. dev. of
+        r_var0 (np.ndarray): Shape-(k,) array containing variance of
             prior on reddening for each star.
 
     Outputs:
@@ -382,103 +448,46 @@ def update_reddenings(R, inv_cov_y, y_obs, y_pred, r0, sigma_r):
             reddening of each star.
         r_var (np.ndarray): Shape-(k,) array containing variance of
             reddening posterior for each star.
-        chisq (np.ndarray): Shape-(k,) array containing chi^2 of
-            solution for each star.
     """
-    RT_Cinv = np.einsum('i,nij->nj', R.T, inv_cov_y)
-    num = r0/sigma_r**2 + np.einsum('ni,ni->n', RT_Cinv, y_obs - y_pred)
-    den = np.einsum('ni,i->n', RT_Cinv, R) + 1./sigma_r**2
+    print('Updating reddenings:')
+    print('  * R^T C_y^(-1) ...')
+    RT_Cinv = np.einsum('ni,nij->nj', R, inv_cov_y)
+    print('  * num = r_0/sigma_r^2 + [R^T C_y^(-1)] dy ...')
+    num = r0/r_var0 + np.einsum('ni,ni->n', RT_Cinv, y_obs - M_pred)
+    print('  * den = [R^T C_y^(-1)] R + 1/sigma_r^2 ...')
+    den = np.einsum('ni,ni->n', RT_Cinv, R) + 1./r_var0
+    print('  * r_mean, r_var ...')
     r_mean = num / den
     r_var = 1. / den
 
-    # Chi^2
-    dy = y_pred + R[None,:]*r_mean[:,None] - y_obs
-    chisq = np.einsum('ni,nij,nj->n', dy, inv_cov_y, dy)
-
-    return r_mean, r_var, chisq
+    return r_mean, r_var
 
 
-class DataNormalizer(object):
-    def __init__(self, x, scale_only=False):
-        if scale_only:
-            self._mu = 0.
-        else:
-            self._mu = np.median(x, axis=0)
-        self._sigma = np.std(x, axis=0)
-
-    def normalize(self, x, scale_only=False):
-        if scale_only:
-            return x/self._sigma
-        return (x-self._mu)/self._sigma
-
-    def unnormalize(self, xp, scale_only=False):
-        if scale_only:
-            return xp*self._sigma
-        return xp*self._sigma + self._mu
-
-    def get_isig_norm(self):
-        isig_norm = DataNormalizer([])
-        isig_norm._mu = 0.
-        isig_norm._sigma = 1. / self._sigma
-        return isig_norm
+def calc_chisq(dy, inv_cov_y):
+    """
+    Returns the chi^2 for each observation, given
+    an array of residuals and inverse covariance matrices.
     
-    def save(self, fname):
-        d = {
-            'sigma': self._sigma.tolist(),
-            'mu': self._mu.tolist()
-        }
-        with open(fname, 'w') as f:
-            json.dump(d, f)
-
-    @classmethod
-    def load(cls, fname):
-        with open(fname, 'r') as f:
-            d = json.load(f)
-        c = cls([])
-        c._sigma = np.array(d['sigma'])
-        c._mu = np.array(d['mu'])
-        return c
-
-
-class ReddeningRegularizer(keras.regularizers.Regularizer):
+        chi^2 = dy^T C^{-1} dy.
+    
+    Inputs:
+        dy (np.ndarray): Residual values. Shape = (n_obs, n_dim),
+            where n_obs is the number of observations, and n_dim is
+            the dimensionality of the vector space.
+        inv_cov_y (np.ndarray): Inverse covariance matrices.
+            Shape = (n_obs, n_dim, n_dim).
+    
+    Returns:
+        chisq (np.ndarray): Chi^2 for each observation. Shape=(n_obs,).
     """
-    Kernel regularizer that punishes negative entries in the
-    reddening vector. Adapted from tf.keras.regularizers.L1L2.
-
-    Arguments:
-        l1: Float; L1 regularization factor.
-        l2: Float; L2 regularization factor.
-    """
-
-    def __init__(self, l1=0., l2=0.):
-        self.l1 = K.cast_to_floatx(l1)
-        self.l2 = K.cast_to_floatx(l2)
-
-    def __call__(self, x):
-        if not self.l1 and not self.l2:
-            return K.constant(0.)
-        regularization = 0.
-        # Convert from reddening to extinction vector, assuming that
-        # the weights x represent (G, X1-G, X2-G, X3-G, ...). This
-        # operation turns x into (G+G, X1, X2, X3, ...). The first
-        # entry is 2G instead of G, but the G component never goes
-        # negative in practice.
-        x = tf.math.add(x, x[...,0])
-        # Only penalize negative values
-        x = tf.math.minimum(x, 0.)
-        if self.l1: # 1-norm regularization
-            regularization += self.l1 * math_ops.reduce_sum(math_ops.abs(x))
-        if self.l2: # 2-norm regularization
-            regularization += self.l2 * math_ops.reduce_sum(math_ops.square(x))
-        return regularization
-
-    def get_config(self):
-        return {'l1': float(self.l1), 'l2': float(self.l2)}
+    C_inv_dy = np.einsum('nij,nj->ni', inv_cov_y, dy)
+    chisq = np.einsum('ni,ni->n', dy, C_inv_dy)
+    return chisq
 
 
 def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
-    # f : \theta --> M
-    atm = keras.Input(shape=(3,), name='atm_params')
+    # Stellar model: B M(theta)
+    atm = keras.Input(shape=(3,), name='theta')
     x = atm
     for i in range(n_hidden_layers):
         x = keras.layers.Dense(
@@ -486,30 +495,43 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
             activation='sigmoid',
             kernel_regularizer=keras.regularizers.l2(l=l2)
         )(x)
-    mag_color = keras.layers.Dense(n_bands, name='mag_color')(x)
+    mag_color = keras.layers.Dense(n_bands, name='BM')(x)
 
-    # Extinction/reddening
-    red = keras.Input(shape=(1,), name='reddening')
+    # Reddening measurement E
+    red = keras.Input(shape=(1,), name='E')
+    
+    # Extinction vector: R(theta)
+    ext_vec = keras.layers.Dense(
+        n_bands,
+        use_bias=True,
+        activation='exponential',
+        kernel_regularizer=keras.regularizers.l2(l=1.e0),
+        name='R'
+    )(atm)
+    
+    # Extinction A = ER
+    ext = keras.layers.Multiply(name='A')([red, ext_vec])
+    
+    # Transform extinction to extinction,reddening using B: BA
+    B = np.identity(n_bands, dtype='f4')
+    B[1:,0] = -1.
     ext_red = keras.layers.Dense(
         n_bands,
         use_bias=False,
-        kernel_regularizer=ReddeningRegularizer(l1=0.1),
-        name='extinction_reddening'
-    )(red)
+        trainable=False,
+        weights=[B.T],
+        name='BA'
+    )(ext)
 
-    #B = np.identity(n_bands, dtype='f4')
-    #B[1:,0] = -1.
-    #B = tf.constant(B)
-    #B = K.reshape(B, (-1, n_bands, n_bands))
-    #ext_red = keras.layers.Dot((1,1), name='ext_red')([B, ext])
-
-    y = keras.layers.Add(name='reddened_mag_color')([mag_color, ext_red])
+    # Predicted mag,color, B(M+A)
+    y = keras.layers.Add(name='B_M_plus_A')([mag_color, ext_red])
 
     # Cholesky decomposition of inverse covariance matrix, L L^T = C^(-1)
     LT = keras.Input(shape=(n_bands,n_bands), name='LT')
 
-    # Multiply y by L^T, since loss is given by |L^T (y_pred - y_obs)|^2
-    LTy = keras.layers.Dot((2,1), name='LTy')([LT, y])
+    # Multiply y_pred by L^T, since loss is given by |L^T (y_pred - y_obs)|^2,
+    # where y_pred = B(M+A), and y_obs = B(m-mu).
+    LTy = keras.layers.Dot((2,1), name='LT_B_M_plus_A')([LT, y])
 
     # Compile model
     model = keras.Model(inputs=[atm,red,LT], outputs=LTy)
@@ -542,10 +564,16 @@ def split_dataset(frac, *args):
     return left, right
 
 
-def train_model(nn_model, io_train, epochs=100, checkpoint_fn='checkpoint'):
+def train_model(nn_model, io_train, epochs=100,
+                checkpoint_fn='checkpoint', batch_size=32):
+    checkpoint_fn = (
+          'checkpoints/'
+        + checkpoint_fn
+        + '.e{epoch:03d}_vl{val_loss:.3f}.h5'
+    )
     callbacks = [
         keras.callbacks.ModelCheckpoint(
-            filepath='checkpoints/'+checkpoint_fn+'.e{epoch:03d}_vl{val_loss:.3f}.h5',
+            filepath=checkpoint_fn,
             save_best_only=True,
             monitor='val_loss',
             verbose=1
@@ -557,21 +585,58 @@ def train_model(nn_model, io_train, epochs=100, checkpoint_fn='checkpoint'):
         inputs, outputs,
         epochs=epochs,
         validation_split=0.25/0.9,
-        callbacks=callbacks
+        callbacks=callbacks,
+        batch_size=batch_size
     )
 
 
-def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
+def evaluate_model(nn_model, io_eval, batch_size=32, rchisq_max=None):
+    """
+    Runs the model on the given inputs and outputs, and returns the
+    MSE and loss.
+    
+    Inputs:
+        nn_model (keras.Model): The neural network model.
+        io_eval (dict): A dictionary containing, among other things,
+            x_p, r, LT and LTy. If rchisq_max is provided, then the
+            dictionary must also contain rchisq.
+        batch_size (int): Defaults to 32.
+        rchisq_max (float): Stars with greater than this reduced chi^2
+            will not be included in the calculation. Defaults to None.
+    
+    Returns:
+        A list containing the MSE and loss.
+    """
+    inputs = [io_eval['x_p'], io_eval['r'], io_eval['LT']]
+    outputs = io_eval['LTy']
+    
+    if rchisq_max is not None:
+        idx = (io_eval['rchisq'] < rchisq_max)
+        inputs = [x[idx] for x in inputs]
+        outputs = outputs[idx]
+    
+    loss = nn_model.evaluate(
+        inputs,
+        outputs,
+        batch_size=batch_size,
+        verbose=0
+    )
+    
+    loss = [float(x) for x in loss] # Make JSON serializable
+    return loss
+
+
+def diagnostic_plots(nn_model, io_test, d_test, suffix=None):
     if suffix is None:
         suff = ''
     else:
         suff = '_' + suffix
     
     inputs = [
-        nn_model.get_layer(name='atm_params').input,
-        nn_model.get_layer(name='reddening').input
+        nn_model.get_layer(name='theta').input,
+        nn_model.get_layer(name='E').input
     ]
-    outputs = nn_model.get_layer(name='reddened_mag_color').output
+    outputs = nn_model.get_layer(name='B_M_plus_A').output
     absmag_model = keras.Model(inputs, outputs)
 
     # Predict y for the test dataset
@@ -588,10 +653,25 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
     test_pred['y_resid'] = io_test['y'] - test_pred['y']
 
     # Get the extinction vector
-    R = extract_R(nn_model)
-    #R = nn_model.get_layer('extinction_reddening').get_weights()[0][0]
+    R = predict_R(nn_model)
     R[1:] += R[0]
-    print('Extinction/reddening vector:', R)
+    print(
+          'R(<theta>) = ['
+        + ' '.join(list(map('{:.3f}'.format,R)))
+        + ']'
+    )
+    R_all = predict_R(nn_model, io_test['x_p'])
+    R_all[:,1:] += R_all[:,0][:,None]
+    print(
+          '<R> = ['
+        + ' '.join(list(map('{:.3f}'.format,np.median(R_all,axis=0))))
+        + ']'
+    )
+    print(
+          's_R = ['
+        + ' '.join(list(map('{:.3f}'.format,np.std(R_all,axis=0))))
+        + ']'
+    )
 
     # Read out colors, magnitudes
     g = io_test['y'][:,3] + io_test['y'][:,0]
@@ -616,12 +696,18 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
     A_gaia_g = 0.25 * R[0]
     E_bp_rp = 0.25 * (R[1] - R[2])
 
+    print('g =', g)
+    print('ri =', ri)
+    print('gr =', gr)
+    print('gaia_g =', gaia_g)
+    print('bp_rp =', bp_rp)
+
     # Plot HRD
     params = {
         'density': (None, r'$N$', (None, None)),
-        'teff': (d_test['teff'], r'$T_{\mathrm{eff}}$', (4000., 8000.)),
-        'logg': (d_test['logg'], r'$\log \left( g \right)$', (0., 5.)),
-        'feh': (d_test['feh'], r'$\left[ \mathrm{Fe} / \mathrm{H} \right]$', (-2.5, 0.5))
+        'teff': (d_test['atm_param'][:,0], r'$T_{\mathrm{eff}}$', (4000., 8000.)),
+        'logg': (d_test['atm_param'][:,1], r'$\log \left( g \right)$', (0., 5.)),
+        'mh': (d_test['atm_param'][:,2], r'$\left[ \mathrm{M} / \mathrm{H} \right]$', (-2.5, 0.5))
     }
 
     plot_spec = [
@@ -635,14 +721,9 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
         }
     ]
 
-    idx_goodobs = [
-        ~np.isnan(d_test['gaia_g_mag_err']),
-        ~np.isnan(d_test['gaia_bp_mag_err']),
-        ~np.isnan(d_test['gaia_rp_mag_err'])
-    ]
-    idx_goodobs += [~np.isnan(d_test['ps1_mag_err'][:,k]) for k in range(5)]
-    for idx in idx_goodobs:
-        idx &= (np.abs(io_test['y'][:,0]) > 1.e-5)
+    idx_goodobs = np.isfinite(d_test['mag_err'])
+    idx_goodobs &= (np.abs(io_test['cov_y'][:,0,0]) < 90.)[:,None]
+    idx_goodobs = idx_goodobs.T
 
     def scatter_or_hexbin(ax, x, y, c, vmin, vmax, extent):
         if p == 'density':
@@ -739,18 +820,11 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
 
             extent = color_lim[0] + mag_lim
 
-            print(len(colors_obs))
-            print(colors_obs[0].shape)
             idx = (
                   idx_goodobs[ps['mag']]
                 & idx_goodobs[ps['colors'][0][0]]
                 & idx_goodobs[ps['colors'][0][1]]
             )
-            print(idx)
-            print(np.count_nonzero(idx))
-            print(colors_obs[0][idx])
-            print(mag_obs[idx])
-            print(extent)
             im = scatter_or_hexbin(
                 ax_obs,
                 colors_obs[0][idx],
@@ -919,7 +993,7 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
             plt.close(fig)
 
     # Plot histogram of reddening residuals
-    dr = io_test['r'] - d_test['b19']
+    dr = io_test['r'] - d_test['r']
     fig = plt.figure(figsize=(8,5), dpi=150)
     ax = fig.add_subplot(1,1,1)
     ax.hist(dr, range=(-0.15, 0.15), bins=50)
@@ -940,8 +1014,8 @@ def diagnostic_plots(nn_model, io_test, d_test, normalizers, suffix=None):
 
 def calc_dmag_color_dtheta(nn_model, x_p):
     m = keras.Model(
-        inputs=nn_model.get_layer(name='atm_params').input,
-        outputs=nn_model.get_layer(name='mag_color').output
+        inputs=nn_model.get_layer(name='theta').input,
+        outputs=nn_model.get_layer(name='BM').output
     )
     with tf.GradientTape() as g:
         x_p = tf.constant(x_p)
@@ -951,33 +1025,54 @@ def calc_dmag_color_dtheta(nn_model, x_p):
     return J
 
 
+def calc_dext_red_dtheta(nn_model, x_p, r):
+    A_model = keras.Model(
+        inputs=[
+            nn_model.get_layer(name='theta').input,
+            nn_model.get_layer(name='E').input
+        ],
+        outputs=nn_model.get_layer(name='BA').output
+    )
+    r = tf.constant(np.reshape(r, (r.size,1)))
+    #r = tf.reshape(r, (tf.size(r), 1))
+    with tf.GradientTape() as g:
+        x_p = tf.constant(x_p)
+        g.watch(x_p)
+        A = A_model([x_p, r])
+    J = g.batch_jacobian(A, x_p).numpy()
+    return J
+
+
 def main():
+    # Load/create neural network
+    nn_name = 'new'
+    n_hidden = 2
+    nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
+    #nn_model = keras.models.load_model(
+    #    'models/{:s}_{:d}hidden_it13.h5'.format(nn_name, n_hidden)
+    #)
+    nn_model.summary()
+    
     # Load stellar data
     print('Loading data ...')
-    fnames = glob('data/combined_data_*to*.h5')
-    #fnames = ['data/combined_data_00to30.h5']
-    fnames.sort()
-    d,b19,b19_err = load_data(fnames)
-    d = collapse_atm_params(d, b19, b19_err)
+    fname = 'data/apogee_lamost_galah_data.h5'
+    d = load_data(fname)
+    #d = d[::5]
 
     # (training+validation) / test split
     # Fix random seed (same split every run)
     np.random.seed(7)
     (d_train,), (d_test,) = split_dataset(0.9, d)
     np.random.shuffle(d_train) # Want d_train to be in random order
+    print(f'{d_train.size: >10d} training/validation stars.')
+    print(f'{d_test.size: >10d} test stars.')
 
-    # Load/create neural network
-    nn_name = 'rchisqfilt'
-    n_hidden = 2
-    #nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
-    nn_model = keras.models.load_model(
-        'models/{:s}_{:d}hidden_it5.h5'.format(nn_name, n_hidden),
-        custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
-    )
-    nn_model.summary()
-
-    # Iteratively update dM/dtheta contribution to uncertainties, and retrain
-    n_iterations = 7
+    # Iteratively update dM/dtheta contribution to uncertainties,
+    # reddening estimates and reduced chi^2 cut, and retrain.
+    n_iterations = 15
+    
+    # On GPU, use large batch sizes for memory transfer efficiency
+    batch_size = 1024
 
     rchisq_max_init = 100.
     rchisq_max_final = 5.
@@ -989,24 +1084,27 @@ def main():
     rchisq_max = [None] + rchisq_max.tolist()
     print('chi^2/dof = {}'.format(rchisq_max))
 
-    for k in range(6,n_iterations):
+    for k in range(0, n_iterations):
         # Transform data to inputs and outputs
         # On subsequent iterations, inflate errors using
         # gradients dM/dtheta from trained model, and derive new
         # estimates of the reddenings of the stars.
-        io_train,normalizers = get_inputs_outputs(
+        t0 = time()
+        io_train = get_inputs_outputs(
             d_train,
             pretrained_model=None if k == 0 else nn_model,
+            recalc_reddening=True,
             rchisq_max=rchisq_max[k]
         )
-        normalizers['x'].save('data/normalizer_x.json')
-        io_test,_ = get_inputs_outputs(
+        io_test = get_inputs_outputs(
             d_test,
-            normalizers=normalizers,
-            pretrained_model=None if k == 0 else nn_model
+            pretrained_model=None if k == 0 else nn_model,
+            recalc_reddening=True,
         )
+        t1 = time()
+        print(f'Time elapsed to prepare data: {t1-t0:.2f} s')
 
-        ## Set learning rate based on the iteration
+        # Set learning rate based on the iteration
         lr = 0.001 * np.exp(-0.2*k)
         print('learning rate = {}'.format(K.get_value(nn_model.optimizer.lr)))
         print('setting learning rate to {}'.format(lr))
@@ -1014,37 +1112,89 @@ def main():
         
         # Train the model
         print('Iteration {} of {}.'.format(k+1, n_iterations))
+        t0 = time()
         train_model(
             nn_model,
             io_train,
-            epochs=10,
+            epochs=25,
             checkpoint_fn='{:s}_{:d}hidden_it{:d}'.format(
                 nn_name, n_hidden, k
-            )
+            ),
+            batch_size=batch_size
         )
+        t1 = time()
+        print(f'Time elapsed to train: {t1-t0:.2f} s')
         nn_model.save(
             'models/{:s}_{:d}hidden_it{:d}.h5'.format(
                 nn_name, n_hidden, k
             )
         )
         #nn_model = keras.models.load_model(
-        #    'models/{:s}_{:d}hidden_it{:d}.h5'.format(nn_name, n_hidden, k),
-        #    custom_objects={'ReddeningRegularizer':ReddeningRegularizer}
+        #    'models/{:s}_{:d}hidden_it{:d}.h5'.format(nn_name, n_hidden, k)
         #)
 
-        # Plot initial results
+        # Plot results on test set
+        print('Diagnostic plots ...')
+        t0 = time()
         diagnostic_plots(
             nn_model,
             io_test,
             d_test,
-            normalizers,
+            #io_train,
+            #d_train,
             suffix='{:s}_{:d}hidden_it{:d}'.format(nn_name, n_hidden, k)
         )
+        t1 = time()
+        print(f'Time elapsed to make plots: {t1-t0:.2f} s')
 
+    print('Updating covariances and reddening estimates of test dataset ...')
+    t0 = time()
+    io_test = get_inputs_outputs(
+        d_test,
+        pretrained_model=nn_model,
+        recalc_reddening=True
+    )
+    t1 = time()
+    print(f'Time elapsed to update covariances and reddenings: {t1-t0:.2f} s')
+
+    # Evaluate performance on (train, validation and test sets)
+    loss = {}
+    for n,io_eval in (('test',io_test), ('train',io_train)):
+        loss[n] = evaluate_model(
+            nn_model,
+            io_eval,
+            batch_size=batch_size,
+            rchisq_max=rchisq_max[-1]
+        )
+        print(f'{n} loss: {loss[n]}')
+    fname = 'data/loss_{:s}_{:d}hidden_it{:d}.json'.format(
+        nn_name, n_hidden, n_iterations-1
+    )
+    with open(fname, 'w') as f:
+        json.dump(loss, f, indent=2, sort_keys=True)
+    
     fname = 'data/predictions_{:s}_{:d}hidden_it{:d}.h5'.format(
         nn_name, n_hidden, n_iterations-1
     )
     save_predictions(fname, nn_model, d_test, io_test)
+    
+    print('Saving covariance components for small subset of test dataset ...')
+    # Fix random seed (same subset every run)
+    np.random.seed(3)
+    idx = np.arange(d_test.size)
+    np.random.shuffle(idx)
+    idx = idx[:1000]
+    d_comp = d_test[idx]
+    io_comp = get_inputs_outputs(
+        d_comp,
+        pretrained_model=nn_model,
+        recalc_reddening=True,
+        return_cov_components=True
+    )
+    fname = 'data/predictions_{:s}_{:d}hidden_it{:d}_comp.h5'.format(
+        nn_name, n_hidden, n_iterations-1
+    )
+    save_predictions(fname, nn_model, d_comp, io_comp)
 
     return 0
 
