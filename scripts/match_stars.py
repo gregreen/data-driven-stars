@@ -131,35 +131,35 @@ def match_3_catalogs(d1, d2, d3, max_sep=0.1*u.arcsec):
 
 def main():
     ext = 'pdf'
-    fig_dir = '/n/fink2/www/ggreen/dd_stellar_models/'
+    fig_dir = 'plots'
     
-    #d_galah = load_data(glob('data/galah_data_*to*.h5'))
-    #d_apogee = load_data(glob('data/dr16_data_*to*.h5'))
-    #d_ddpayne = load_data(glob('data/ddpayne_data_*to*.h5'))
-    #
-    ## Match GALAH, DDPayne and APOGEE catalogs
-    #idx_galah, idx_ddpayne, idx_apogee = match_3_catalogs(
-    #    d_galah, d_ddpayne, d_apogee
-    #)
-    #d_galah = d_galah[idx_galah]
-    #d_ddpayne = d_ddpayne[idx_ddpayne]
-    #d_apogee = d_apogee[idx_apogee]
-    #mask_galah = (idx_galah != -1)
-    #mask_ddpayne = (idx_ddpayne != -1)
-    #mask_apogee = (idx_apogee != -1)
-    #print('{:d} matches.'.format(len(d_galah)))
-    #
-    ## Save matches
-    #fname = 'data/crossmatches_galah_apogee_ddpayne.h5'
-    #dset_kw = dict(chunks=True, compression='gzip', compression_opts=3)
-    #with h5py.File(fname, 'w') as f:
-    #    f.create_dataset('/galah', data=d_galah, **dset_kw)
-    #    f.create_dataset('/ddpayne', data=d_ddpayne, **dset_kw)
-    #    f.create_dataset('/apogee', data=d_apogee, **dset_kw)
-    #    f.create_dataset('/mask_galah', data=mask_galah.astype('u1'), **dset_kw)
-    #    f.create_dataset('/mask_ddpayne', data=mask_ddpayne.astype('u1'), **dset_kw)
-    #    f.create_dataset('/mask_apogee', data=mask_apogee.astype('u1'), **dset_kw)
-    #
+    d_galah = load_data(glob('data/galah_data_*to*.h5'))
+    d_apogee = load_data(glob('data/dr16_data_*to*.h5'))
+    d_ddpayne = load_data(glob('data/ddpayne_data_*to*.h5'))
+    
+    # Match GALAH, DDPayne and APOGEE catalogs
+    idx_galah, idx_ddpayne, idx_apogee = match_3_catalogs(
+        d_galah, d_ddpayne, d_apogee
+    )
+    d_galah = d_galah[idx_galah]
+    d_ddpayne = d_ddpayne[idx_ddpayne]
+    d_apogee = d_apogee[idx_apogee]
+    mask_galah = (idx_galah != -1)
+    mask_ddpayne = (idx_ddpayne != -1)
+    mask_apogee = (idx_apogee != -1)
+    print('{:d} matches.'.format(len(d_galah)))
+    
+    # Save matches
+    fname = 'data/crossmatches_galah_apogee_ddpayne.h5'
+    dset_kw = dict(chunks=True, compression='gzip', compression_opts=3)
+    with h5py.File(fname, 'w') as f:
+        f.create_dataset('/galah', data=d_galah, **dset_kw)
+        f.create_dataset('/ddpayne', data=d_ddpayne, **dset_kw)
+        f.create_dataset('/apogee', data=d_apogee, **dset_kw)
+        f.create_dataset('/mask_galah', data=mask_galah.astype('u1'), **dset_kw)
+        f.create_dataset('/mask_ddpayne', data=mask_ddpayne.astype('u1'), **dset_kw)
+        f.create_dataset('/mask_apogee', data=mask_apogee.astype('u1'), **dset_kw)
+    
     #return 0
     
     # Load matches
@@ -242,8 +242,6 @@ def main():
     
     # Choose one survey to anchor the (teff, logg, feh) scale
     surveys = ('apogee', 'galah', 'lamost')
-    #anchor = 'lamost'
-    #comparisons = ('apogee', 'galah')
     
     # Plot histogram of residuals
     print('Plotting histograms of residuals ...')
@@ -337,365 +335,6 @@ def main():
         
         fig.savefig(os.path.join(fig_dir, f'resid_hist_{name}.{ext}'), dpi=150)
         plt.close(fig)
-    
-    return 0
-    
-    # Fit offsets and calibrate uncertainties
-    from calibrate_errors import get_log_posterior, fit_data
-    from scipy.optimize import minimize
-    
-    param_scale = {'teff': 50, 'logg': 0.05, 'feh': 0.05}
-    
-    fit_params = {}
-    survey_order = ('galah', 'apogee', 'lamost')
-    
-    for name in param_names:
-        print(f'Calibrating uncertainties for {name} ...')
-        
-        x_obs = np.empty((3,d_galah.size))
-        x_err = np.empty((3,d_galah.size))
-        
-        for i,survey in enumerate(survey_order):
-            x_obs[i] = params[name][survey]
-            x_err[i] = param_errs[name][survey]
-            idx_bad = ~survey_masks[survey]
-            x_obs[i][idx_bad] = np.nan
-            x_err[i][idx_bad] = np.nan
-        
-        # Fit (a,b,alpha,beta)
-        scale = param_scale[name]
-        #theta_guess = np.zeros(8)
-        #theta_guess += 0.1 * np.random.normal(size=theta_guess.size)
-        #ln_post = get_log_posterior(
-        #    x_obs, x_err,
-        #    0.1, 0.1*scale,
-        #    0.1, 1.0*scale
-        #)
-        #res = minimize(lambda th: -ln_post(th), theta_guess)
-
-        #a_fit = np.ones(3)
-        #b_fit = np.hstack([0., res['x'][:2]])
-        ##alpha_fit = 1. + np.exp(res['x'][2:5])
-        #alpha_fit = np.exp(res['x'][2:5])
-        ##beta_fit = np.exp(res['x'][5:8])
-        #beta_fit = np.exp(np.full(3, res['x'][5]))
-
-        #print('Survey order:', survey_order)
-        #print(f'a* = {a_fit}')
-        #print(f'b* = {b_fit}')
-        #print(f'alpha* = {alpha_fit}')
-        #print(f'beta* = {beta_fit}')
-        fit = fit_data(
-            x_obs, x_err,
-            0.1*scale, 0.1,
-            n_iterations=5,
-            chi_cut=30.
-        )
-        
-        fit_params[name] = {}
-        for k,s in enumerate(survey_order):
-            fit_params[name][s] = {
-                'a': fit['a'][k],
-                'b': fit['b'][k],
-                'alpha': fit['alpha'][k],
-                'beta': np.abs(fit['beta'][k])
-            }
-    
-    # Plot histogram of chi, using modified values & uncertainties
-    comparisons = [
-        ('apogee','lamost'),
-        ('galah', 'lamost'),
-        ('apogee', 'galah')
-    ]
-    
-    param_split = {
-        'teff': 100.,
-        'feh': 0.1,
-        'logg': 0.1
-    }
-    
-    print('Plotting histograms of chi ...')
-    for name in param_names:
-        fig,ax_list = plt.subplots(4,3, figsize=(12,10))
-        fig.suptitle(rf'$\Delta {param_labels[name]}$')
-        
-        p = fit_params[name]
-        vsplit = param_split[name]
-        
-        for k,(comp,anchor) in enumerate(comparisons):
-            val0 = params[name][anchor]
-            var0 = param_errs[name][anchor]**2
-            valp0 = p[anchor]['a']*val0 + p[anchor]['b']
-            varp0 = (
-                p[anchor]['alpha']**2 * var0
-                + p[anchor]['b']**2
-            )
-            
-            val1 = params[name][comp]
-            var1 = param_errs[name][comp]**2
-            
-            valp1 = p[comp]['a']*val1 + p[comp]['b']
-            varp1 = (
-                p[comp]['alpha']**2 * var1
-                + p[comp]['b']**2
-            )
-            
-            chi = (valp1-valp0) / np.sqrt(var0+var1)
-            chip = (valp1-valp0) / np.sqrt(varp0+varp1)
-            
-            idx = survey_masks[comp] & survey_masks[anchor]
-            idx_lowerr = (np.sqrt(var0+var1) < vsplit)
-            chipe0 = chip[idx & idx_lowerr]
-            chipe1 = chip[idx & ~idx_lowerr]
-            chi = chi[idx]
-            chip = chip[idx]
-            print(f'{comp} & {anchor}: {np.count_nonzero(idx)} matches.')
-            
-            print('chi percentiles:')
-            pctiles = [0., 1., 10., 50., 90., 99., 100.]
-            pct_vals = np.percentile(chi, pctiles)
-            pct_valps = np.percentile(chip, pctiles)
-            for pct,val,valp in zip(pctiles, pct_vals, pct_valps):
-                print(f'  {pct:.0f} : {val:.03f} {valp:.03f}')
-            
-            ax, axp, axe0, axe1 = ax_list[:,k]
-            
-            _,x_edges,_ = ax.hist(chi, range=(-5., 5.), bins=50, alpha=0.7)
-            _,x_edges,_ = axp.hist(chip, range=(-5., 5.), bins=50, alpha=0.7)
-            _,x_edges,_ = axe0.hist(chipe0, range=(-5., 5.), bins=50, alpha=0.7)
-            _,x_edges,_ = axe1.hist(chipe1, range=(-5., 5.), bins=50, alpha=0.7)
-            print(x_edges)
-            
-            dx = x_edges[1]-x_edges[0]
-            x_gauss = np.linspace(-5., 5., 1000)
-            y_gauss = dx * chi.size * np.exp(-0.5*x_gauss**2) / np.sqrt(2.*np.pi)
-            ax.plot(x_gauss, y_gauss, c='g', alpha=0.5)
-            axp.plot(x_gauss, y_gauss, c='g', alpha=0.5)
-            ne0 = chipe0.size / chi.size
-            ne1 = chipe1.size / chi.size
-            axe0.plot(x_gauss, y_gauss*ne0, c='g', alpha=0.5)
-            axe1.plot(x_gauss, y_gauss*ne1, c='g', alpha=0.5)
-            
-            for a in (ax,axp,axe0,axe1):
-                a.grid('on', alpha=0.5)
-                a.xaxis.set_major_locator(ticker.AutoLocator())
-                a.xaxis.set_minor_locator(ticker.AutoMinorLocator())
-                a.set_yticklabels([])
-            
-            ax.set_title(
-                rf'${survey_labels[comp]} - {survey_labels[anchor]}\ '
-                rf'\left( {chi.size} \right)$'
-            )
-            ax.set_xticklabels([])
-            axp.set_xticklabels([])
-            axe0.set_xticklabels([])
-            
-            if k == 0:
-                ax.set_ylabel(r'$\chi$')
-                axp.set_ylabel(r'$\chi^{{\prime}}$')
-                axe0.set_ylabel(rf'$\chi^{{\prime}},\ \sigma < {vsplit}$')
-                axe1.set_ylabel(rf'$\chi^{{\prime}},\ \sigma > {vsplit}$')
-            
-            fit_label = (
-                  rf'$\alpha = {p[comp]["alpha"]:.3f}, {p[anchor]["alpha"]:.3f}$'
-                + '\n'
-                + rf'$\beta = {p[comp]["beta"]:.3f}, {p[anchor]["beta"]:.3f}$'
-            )
-            axp.text(
-                0.05, 0.95,
-                fit_label,
-                ha='left', va='top',
-                transform=axp.transAxes
-            )
-        
-        fig.subplots_adjust(
-            top=0.90, bottom=0.10,
-            right=0.95, left=0.05,
-            hspace=0.10, wspace=0.08
-        )
-        
-        fig.savefig(os.path.join(fig_dir, f'chip_hist_{name}.{ext}'), dpi=150)
-        plt.close(fig)
-    
-    return 0
-    
-    # Plot histogram of residuals, as a function of combined uncertainty
-    sigma_comb = [np.sqrt(s1**2+s2**2) for s1,s2 in val_errs]
-    
-    sigma_0 = [50., 0.05, 0.03]
-    
-    err_floors = [25., 0.07, 0.04]
-    err_scales = [0.65, 1., 1.0]
-    
-    for dval,sigma,sig_0,label,name,sfl,ssc in zip(dvals, sigma_comb, sigma_0,
-                                                   labels, names, err_floors,
-                                                   err_scales):
-        s_edges = [0., sig_0, 2*sig_0, 4*sig_0, 8*sig_0]
-        
-        n_ax = len(s_edges)-1
-        fig,ax_list = plt.subplots(n_ax//2,2, figsize=(8,n_ax+1))
-        ax_list.shape = (-1,)
-        fig.suptitle(r'$\chi \ (\mathrm{DDPayne}-\mathrm{APOGEE\ DR16}+\mathrm{zp})$')
-        
-        for k,(s0,s1,ax) in enumerate(zip(s_edges[:-1],s_edges[1:],ax_list)):
-            idx = (sigma > s0) & (sigma < s1)
-            chi = (dval[idx]-np.median(dval)) / np.sqrt(ssc**2 * sigma[idx]**2 + sfl**2)
-            bins = max(min(int(0.1*np.count_nonzero(idx)), 100), 10)
-            _,x_edges,_ = ax.hist(chi, range=(-5.,5.), bins=bins, alpha=0.7)
-            dx = x_edges[1]-x_edges[0]
-            x = np.linspace(-5., 5., 1000)
-            y_gauss = dx * chi.size * np.exp(-0.5*x**2) / np.sqrt(2.*np.pi)
-            ax.plot(x, y_gauss, c='g', alpha=0.5)
-            ax.grid('on', alpha=0.5)
-            ax.xaxis.set_major_locator(ticker.AutoLocator())
-            ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
-            ax.text(
-                0.05, 0.95,
-                r'${:.3g} < \sigma < {:.3g}$'.format(s0,s1),
-                ha='left',
-                va='top',
-                transform=ax.transAxes
-            )
-            if (k >= n_ax-2):
-                print(k)
-                ax.set_xlabel(r'$'+label+'$')
-            else:
-                ax.set_xticklabels([])
-        
-        fig.subplots_adjust(top=0.92, bottom=0.12, hspace=0.05)
-        
-        fig.savefig(
-            '/n/fink2/www/ggreen/dd_stellar_models/ddpayne_vs_apogee_chi_hist_vs_err_'+name+ext,
-            dpi=150
-        )
-        plt.close(fig)
-    
-    # Plot histogram of scores
-    fig,ax_list = plt.subplots(3,1, figsize=(6,12))
-    fig.suptitle(r'$\chi \ (\mathrm{DDPayne}-\mathrm{APOGEE\ DR16}+\mathrm{zp})$')
-    
-    chis = [
-        (dval-np.median(dval)) / np.sqrt(s1**2+s2**2)
-        for dval,(s1,s2) in zip(dvals, val_errs)
-    ]
-    
-    for ax,chi,label in zip(ax_list, chis, labels):
-        _,x_edges,_ = ax.hist(chi, range=(-5.,5.), bins=100, alpha=0.7)
-        dx = x_edges[1]-x_edges[0]
-        x = np.linspace(-5., 5., 1000)
-        y_gauss = dx * chi.size * np.exp(-0.5*x**2) / np.sqrt(2.*np.pi)
-        ax.plot(x, y_gauss, c='g', alpha=0.5)
-        ax.grid('on', alpha=0.5)
-        ax.xaxis.set_major_locator(ticker.AutoLocator())
-        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
-        ax.set_xlabel(r'$'+label+'$')
-    
-    fig.subplots_adjust(top=0.95, bottom=0.05)
-    
-    fig.savefig('/n/fink2/www/ggreen/dd_stellar_models/ddpayne_vs_apogee_chi_hist'+ext)
-    plt.close(fig)
-    
-    # Plot histogram of scores, using error floors
-    chi_primes = [
-        (dval-np.median(dval)) / np.sqrt(sc**2 * (e1**2 + e2**2) + 2*fl**2)
-        for dval,(e1,e2),sc,fl in zip(dvals, val_errs, err_scales, err_floors)
-    ]
-    
-    for log in [False, True]:
-        fig,ax_list = plt.subplots(3,1, figsize=(6,12))
-        fig.suptitle(r'$\chi^{\prime} \ (\mathrm{DDPayne}-\mathrm{APOGEE\ DR16}+\mathrm{zp})$')
-        
-        for ax,chi_p,label in zip(ax_list, chi_primes, labels):
-            _,x_edges,_ = ax.hist(chi_p, range=(-5.,5.), bins=100, alpha=0.7, log=log)
-            dx = x_edges[1]-x_edges[0]
-            x = np.linspace(-5., 5., 1000)
-            y_gauss = dx * chi_p.size * np.exp(-0.5*x**2) / np.sqrt(2.*np.pi)
-            ax.plot(x, y_gauss, c='g', alpha=0.5)
-            ax.grid('on', alpha=0.5)
-            ax.xaxis.set_major_locator(ticker.AutoLocator())
-            ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
-            ax.set_xlabel(r'$'+label+'$')
-        
-        fig.subplots_adjust(top=0.95, bottom=0.05)
-        
-        fname = '/n/fink2/www/ggreen/dd_stellar_models/ddpayne_vs_apogee_chip_hist'
-        if log:
-            fname += '_log'
-        fig.savefig(fname+ext)
-        plt.close(fig)
-    
-    # Plot correlations of residuals
-    fig = plt.figure(figsize=(8,8))
-    fig.suptitle(r'$\chi \ (\mathrm{DDPayne}-\mathrm{APOGEE\ DR16}+\mathrm{zp})$')
-    
-    for row,dy in enumerate(chis[1:]):
-        for col,dx in enumerate(chis[:row+1]):
-            ax = fig.add_subplot(2,2,2*row+col+1)
-            #ax.scatter(
-            #    dx, dy,
-            #    s=3, edgecolors='none',
-            #    c='b', alpha=0.1,
-            #    rasterized=True
-            #)
-            ax.hexbin(
-                dx, dy,
-                extent=(-5.,5.,-5.,5.),
-                gridsize=50,
-                linewidths=0.25
-            )
-            ax.grid('on', alpha=0.5)
-            ax.set_xlim(-5., 5.)
-            ax.set_ylim(-5., 5.)
-            
-            if row == 1:
-                ax.set_xlabel(r'$'+labels[col]+r'$')
-            else:
-                ax.set_xticklabels([])
-            
-            if col == 0:
-                ax.set_ylabel(r'$'+labels[row+1]+r'$')
-            else:
-                ax.set_yticklabels([])
-    
-    fig.savefig('/n/fink2/www/ggreen/dd_stellar_models/ddpayne_vs_apogee_corrs'+ext)
-    plt.close(fig)
-    
-    # Scatterplots
-    fig,ax_list = plt.subplots(1,3, figsize=(11,4))
-    for ax,(val1,val2),label in zip(ax_list, vals, labels):
-        ax.scatter(
-            val1, val2,
-            s=3, edgecolors='none',
-            c='b', alpha=0.1,
-            rasterized=True
-        )
-        xlim = ax.get_xlim()
-        ylim = ax.get_ylim()
-        x0 = max(xlim[0], ylim[0])
-        x1 = min(xlim[1], ylim[1])
-        w = x1 - x0
-        x0 -= 0.25*w
-        x1 += 0.25*w
-        xlim = (x0, x1)
-        ax.plot(xlim, xlim, c='k', lw=1., alpha=0.5)
-        ax.set_xlim(xlim)
-        ax.set_ylim(xlim)
-        ax.set_xlabel(r'$\mathrm{DDPayne}$')
-        ax.set_title(r'$'+label+r'$')
-        ax.xaxis.set_major_locator(ticker.AutoLocator())
-        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
-        ax.yaxis.set_major_locator(ticker.AutoLocator())
-        ax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
-    ax_list[0].set_ylabel(r'$\mathrm{APOGEE}$')
-    fig.subplots_adjust(wspace=0.2, left=0.08, right=0.98, bottom=0.12, top=0.90)
-    
-    fig.savefig('/n/fink2/www/ggreen/dd_stellar_models/ddpayne_vs_apogee_scatter'+ext)
-    plt.close(fig)
-    
-    ## Plot dT in (logg,T) plane
-    #teff = d_ddpayne['ddpayne_teff']
-    #logg = d_ddpayne['ddpayne_logg']
-    #feh = d_ddpayne['ddpayne_feh']
     
     return 0
 
