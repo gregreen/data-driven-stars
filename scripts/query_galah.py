@@ -76,8 +76,12 @@ def filter_tmass(d):
 
 
 def filter_unwise(d):
-    # Filter out bands with bad flags or high chi^2/d.o.f.
-    idx = (d['unwise_flags'] != 0) | (d['unwise_rchi2'] > 5.)
+    # Filter out bad bands
+    idx = (
+          (d['unwise_flags'] != 0) # Bad flags
+        | (d['unwise_rchi2'] > 5.) # High chi^2/d.o.f.
+        | (d['unwise_fracflux'] < 0.1) # Low flux fraction from this source
+    )
     d['unwise_mag'][idx] = np.nan
     d['unwise_mag_err'][idx] = np.nan
     
@@ -166,6 +170,7 @@ def main():
             "    unwise.flags_unwise as unwise_flags, "
             "    unwise.flags_info as unwise_flags_info, "
             "    unwise.rchi2 as unwise_rchi2, "
+            "    unwise.fracflux as unwise_fracflux, "
             ""   # GALAH
             "    galah.teff as teff, "
             "    galah.e_teff as teff_err, "

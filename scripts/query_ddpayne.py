@@ -77,8 +77,12 @@ def filter_tmass(d):
 
 
 def filter_unwise(d):
-    # Filter out bands with bad flags or high chi^2/d.o.f.
-    idx = (d['unwise_flags'] != 0) | (d['unwise_rchi2'] > 5.)
+    # Filter out bad bands
+    idx = (
+          (d['unwise_flags'] != 0) # Bad flags
+        | (d['unwise_rchi2'] > 5.) # High chi^2/d.o.f.
+        | (d['unwise_fracflux'] < 0.1) # Low flux fraction from this source
+    )
     d['unwise_mag'][idx] = np.nan
     d['unwise_mag_err'][idx] = np.nan
     
@@ -182,26 +186,6 @@ def main():
             "    gaia.phot_bp_rp_excess_factor as gaia_bp_rp_excess, "
             ""   # SFD
             "    SFD.EBV(gal_l, gal_b) as SFD, "
-            ""   # LAMOST DDPAYNE
-            "    ddpayne.teff as ddpayne_teff, "
-            "    ddpayne.teff_err as ddpayne_teff_err, "
-            "    ddpayne.teff_flag as ddpayne_teff_flag, "
-            "    ddpayne.logg as ddpayne_logg, "
-            "    ddpayne.logg_err as ddpayne_logg_err, "
-            "    ddpayne.logg_flag as ddpayne_logg_flag, "
-            "    ddpayne.feh as ddpayne_feh, "
-            "    ddpayne.feh_err as ddpayne_feh_err, "
-            "    ddpayne.feh_flag as ddpayne_feh_flag, "
-            "    ddpayne.snr_u as ddpayne_snr_u, "
-            "    ddpayne.snr_g as ddpayne_snr_g, "
-            "    ddpayne.snr_r as ddpayne_snr_r, "
-            "    ddpayne.snr_i as ddpayne_snr_i, "
-            "    ddpayne.snr_z as ddpayne_snr_z, "
-            "    ddpayne.chi2 as ddpayne_chi2, "
-            "    ddpayne.chi2ratio as ddpayne_chi2ratio, "
-            "    ddpayne.qflag_chi2 as ddpayne_qflag_chi2, "
-            "    ddpayne.flag_singlestar as ddpayne_flag_singlestar, "
-            "    ddpayne.subclass as ddpayne_subclass, "
             ""   # PS1
             "    2.5/log(10.)*ps1.err/ps1.mean as ps1_mag_err, "
             "    -2.5*log10(ps1.mean) as ps1_mag, "
@@ -225,7 +209,28 @@ def main():
             "    2.5/log(10.)*unwise.dflux/unwise.flux as unwise_mag_err, "
             "    unwise.flags_unwise as unwise_flags, "
             "    unwise.flags_info as unwise_flags_info, "
-            "    unwise.rchi2 as unwise_rchi2 "
+            "    unwise.rchi2 as unwise_rchi2, "
+            "    unwise.fracflux as unwise_fracflux, "
+            ""   # LAMOST DDPAYNE
+            "    ddpayne.teff as ddpayne_teff, "
+            "    ddpayne.teff_err as ddpayne_teff_err, "
+            "    ddpayne.teff_flag as ddpayne_teff_flag, "
+            "    ddpayne.logg as ddpayne_logg, "
+            "    ddpayne.logg_err as ddpayne_logg_err, "
+            "    ddpayne.logg_flag as ddpayne_logg_flag, "
+            "    ddpayne.feh as ddpayne_feh, "
+            "    ddpayne.feh_err as ddpayne_feh_err, "
+            "    ddpayne.feh_flag as ddpayne_feh_flag, "
+            "    ddpayne.snr_u as ddpayne_snr_u, "
+            "    ddpayne.snr_g as ddpayne_snr_g, "
+            "    ddpayne.snr_r as ddpayne_snr_r, "
+            "    ddpayne.snr_i as ddpayne_snr_i, "
+            "    ddpayne.snr_z as ddpayne_snr_z, "
+            "    ddpayne.chi2 as ddpayne_chi2, "
+            "    ddpayne.chi2ratio as ddpayne_chi2ratio, "
+            "    ddpayne.qflag_chi2 as ddpayne_qflag_chi2, "
+            "    ddpayne.flag_singlestar as ddpayne_flag_singlestar, "
+            "    ddpayne.subclass as ddpayne_subclass "
             "FROM "
             "    gaia_dr2_source as gaia, "
             "    lamost_dr5_ddpayne(inner, matchedto=gaia, dmax=0.2, nmax=1) as ddpayne, "
@@ -254,11 +259,11 @@ def main():
             "      ) "
             # DDPayne quality cuts
             "    & ( "
-            "          (ddpayne_snr_u > spec_snr_min) "
-            "        | (ddpayne_snr_g > spec_snr_min) "
-            "        | (ddpayne_snr_r > spec_snr_min) "
-            "        | (ddpayne_snr_i > spec_snr_min) "
-            "        | (ddpayne_snr_z > spec_snr_min) "
+            "          (ddpayne_snr_u > {spec_snr_min}) "
+            "        | (ddpayne_snr_g > {spec_snr_min}) "
+            "        | (ddpayne_snr_r > {spec_snr_min}) "
+            "        | (ddpayne_snr_i > {spec_snr_min}) "
+            "        | (ddpayne_snr_z > {spec_snr_min}) "
             "      ) "
             "    & (ddpayne_qflag_chi2 == b'good') "
             "    & (ddpayne_flag_singlestar == b'YES') "

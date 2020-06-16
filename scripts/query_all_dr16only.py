@@ -76,8 +76,12 @@ def filter_tmass(d):
 
 
 def filter_unwise(d):
-    # Filter out bands with bad flags or high chi^2/d.o.f.
-    idx = (d['unwise_flags'] != 0) | (d['unwise_rchi2'] > 5.)
+    # Filter out bad bands
+    idx = (
+          (d['unwise_flags'] != 0) # Bad flags
+        | (d['unwise_rchi2'] > 5.) # High chi^2/d.o.f.
+        | (d['unwise_fracflux'] < 0.1) # Low flux fraction from this source
+    )
     d['unwise_mag'][idx] = np.nan
     d['unwise_mag_err'][idx] = np.nan
     
@@ -230,23 +234,6 @@ def main():
             "    gaia.phot_bp_rp_excess_factor as gaia_bp_rp_excess, "
             ""   # SFD
             "    SFD.EBV(gal_l, gal_b) as SFD, "
-            ""   # SDSS
-            "    sdss.survey as sdss_survey, "
-            "    sdss.starflag as sdss_starflag, "
-            "    sdss.starflags as sdss_starflag_verbose, "
-            "    sdss.param as sdss_aspcap_param, "
-            "    sdss.fparam_cov as sdss_aspcap_fparam_cov, "
-            "    sdss.teff_err as sdss_aspcap_teff_err, "
-            "    sdss.logg_err as sdss_aspcap_logg_err, "
-            "    sdss.m_h_err as sdss_aspcap_m_h_err, "
-            "    sdss.alpha_m_err as sdss_aspcap_alpha_m_err, "
-            "    sdss.snr as sdss_snr, "
-            "    sdss.aspcapflag as sdss_aspcap_flag, "
-            "    sdss.aspcapflags as sdss_aspcap_flag_verbose, "
-            "    sdss.aspcap_chi2 as sdss_aspcap_chi2, "
-            "    sdss.gaia_r_est as gaia_r_est, "
-            "    sdss.gaia_r_lo as gaia_r_lo, "
-            "    sdss.gaia_r_hi as gaia_r_hi, "
             ""   # PS1
             "    2.5/log(10.)*ps1.err/ps1.mean as ps1_mag_err, "
             "    -2.5*log10(ps1.mean) as ps1_mag, "
@@ -270,7 +257,25 @@ def main():
             "    2.5/log(10.)*unwise.dflux/unwise.flux as unwise_mag_err, "
             "    unwise.flags_unwise as unwise_flags, "
             "    unwise.flags_info as unwise_flags_info, "
-            "    unwise.rchi2 as unwise_rchi2 "
+            "    unwise.rchi2 as unwise_rchi2, "
+            "    unwise.fracflux as unwise_fracflux, "
+            ""   # SDSS (APOGEE)
+            "    sdss.survey as sdss_survey, "
+            "    sdss.starflag as sdss_starflag, "
+            "    sdss.starflags as sdss_starflag_verbose, "
+            "    sdss.param as sdss_aspcap_param, "
+            "    sdss.fparam_cov as sdss_aspcap_fparam_cov, "
+            "    sdss.teff_err as sdss_aspcap_teff_err, "
+            "    sdss.logg_err as sdss_aspcap_logg_err, "
+            "    sdss.m_h_err as sdss_aspcap_m_h_err, "
+            "    sdss.alpha_m_err as sdss_aspcap_alpha_m_err, "
+            "    sdss.snr as sdss_snr, "
+            "    sdss.aspcapflag as sdss_aspcap_flag, "
+            "    sdss.aspcapflags as sdss_aspcap_flag_verbose, "
+            "    sdss.aspcap_chi2 as sdss_aspcap_chi2, "
+            "    sdss.gaia_r_est as gaia_r_est, "
+            "    sdss.gaia_r_lo as gaia_r_lo, "
+            "    sdss.gaia_r_hi as gaia_r_hi "
             "FROM "
             "    gaia_dr2_source as gaia, "
             "    sdss_dr16_allstar(inner, matchedto=gaia, dmax=0.2, nmax=1) as sdss, "
