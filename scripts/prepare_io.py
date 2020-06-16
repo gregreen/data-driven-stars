@@ -54,16 +54,21 @@ def extract_data(d, b19, b19_err):
     ]
     io_data = np.empty(d.size, dtype=dtype)
     
-    # Offsets to bring surveys into alignment
+    # Offsets to bring spectroscopic labels from different
+    # surveys into alignment
     offsets = {
-        'apogee': np.array([-39.2, 0., 0.011]),
+        'apogee': np.array([23.04715, 0.01189, 0.05019]),
         'lamost': np.array([0., 0., 0.]),
-        'galah': np.array([-18.7, 0.004, 0.062])
+        'galah': np.array([-3.60096, -0.01396, 0.06770])
     }
     # Fix offsets to GALAH
     offsets['apogee'] -= offsets['galah']
     offsets['lamost'] -= offsets['galah']
     offsets['galah'][:] = 0.
+    
+    print('offsets:')
+    for key in offsets:
+        print(f'  * {key}: {offsets[key]}')
 
     # How to load data depends on survey
     if 'sdss_aspcap_param' in d.dtype.names: # APOGEE
@@ -78,7 +83,7 @@ def extract_data(d, b19, b19_err):
             for l,j in enumerate(param_idx):
                 io_data['atm_param_cov'][:,k,l] = d['sdss_aspcap_fparam_cov'][:,9*k+l]
         
-        io_data['atm_param'] += offsets['apogee'][None,:]
+        io_data['atm_param'] -= offsets['apogee'][None,:]
 
         # Copy calibrated errors into diagonals of covariance matrices.
         #   - Keep uncalibrated errors if larger.
@@ -110,7 +115,7 @@ def extract_data(d, b19, b19_err):
         io_data['atm_param'][:,0] = d['ddpayne_teff'][:]
         io_data['atm_param'][:,1] = d['ddpayne_logg'][:]
         io_data['atm_param'][:,2] = d['ddpayne_feh'][:]
-        io_data['atm_param'] += offsets['lamost'][None,:]
+        io_data['atm_param'] -= offsets['lamost'][None,:]
 
         # Diagonal covariance matrix
         io_data['atm_param_cov'][:] = 0.
@@ -124,7 +129,7 @@ def extract_data(d, b19, b19_err):
         io_data['atm_param'][:,0] = d['teff'][:]
         io_data['atm_param'][:,1] = d['logg'][:]
         io_data['atm_param'][:,2] = d['feh'][:]
-        io_data['atm_param'] += offsets['galah'][None,:]
+        io_data['atm_param'] -= offsets['galah'][None,:]
 
         # Diagonal covariance matrix
         io_data['atm_param_cov'][:] = 0.
@@ -277,14 +282,29 @@ def finalize_data(d):
 
 
 def print_stats(d):
+    n_d = d.size
+    
     print('Atmospheric parameter source:')
     for key in np.unique(d['atm_source']):
         n = np.count_nonzero(d['atm_source'] == key)
-        print(f'  * {key.decode("utf-8")} : {n}')
+        print(f'  * {key.decode("utf-8")} : {n} ({n/n_d:.3f})')
+    
     print('Reddening source:')
     for key in np.unique(d['r_source']):
         n = np.count_nonzero(d['r_source'] == key)
-        print(f'  * {key.decode("utf-8")} : {n}')
+        print(f'  * {key.decode("utf-8")} : {n} ({n/n_d:.3f})')
+    
+    print('Sources per band:')
+    n_pi = np.count_nonzero(
+          np.isfinite(d['parallax'])
+        & (d['parallax'] / d['parallax_err'] > 5.)
+    )
+    print(f'  *  pi : {n_pi} ({n_pi/n_d:.3f})')
+    
+    n_band = np.count_nonzero(np.isfinite(d['mag']), axis=0)
+    bands = ['G','BP','RP'] + list('grizyJH') + ['K_s','W_1','W_2']
+    for b,n in zip(bands,n_band):
+        print(f'  * {b: >3s} : {n} ({n/n_d:.3f})')
 
 
 def main():
