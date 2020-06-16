@@ -231,7 +231,7 @@ def get_inputs_outputs(d, pretrained_model=None,
         n_dof = np.zeros(d.size, dtype='i4')
         for k in range(n_bands):
             n_dof += (cov_y[:,k,k] < (large_err-1.)**2).astype('i4')
-        print('n_dof =', n_dof)
+        #print('n_dof =', n_dof)
 
         # Calculate reduced chi^2 for each star
         print('Calculate chi^2/d.o.f. for each star ...')
@@ -241,6 +241,8 @@ def get_inputs_outputs(d, pretrained_model=None,
         print('chi^2/dof percentiles:')
         for p,rc in zip(pct,rchisq_pct):
             print(rf'  {p:.0f}% : {rc:.3g}')
+        idx_rchisq = (rchisq < 10.)
+        print(f'<chi^2/d.o.f.> = {np.mean(rchisq[idx_rchisq]):.3g}')
         
         # Filter on reduced chi^2
         if rchisq_max is not None:
@@ -586,6 +588,42 @@ def train_model(nn_model, io_train, epochs=100,
         callbacks=callbacks,
         batch_size=batch_size
     )
+
+
+def evaluate_model(nn_model, io_eval, batch_size=32, rchisq_max=None):
+    """
+    Runs the model on the given inputs and outputs, and returns the
+    MSE and loss.
+    
+    Inputs:
+        nn_model (keras.Model): The neural network model.
+        io_eval (dict): A dictionary containing, among other things,
+            x_p, r, LT and LTy. If rchisq_max is provided, then the
+            dictionary must also contain rchisq.
+        batch_size (int): Defaults to 32.
+        rchisq_max (float): Stars with greater than this reduced chi^2
+            will not be included in the calculation. Defaults to None.
+    
+    Returns:
+        A list containing the MSE and loss.
+    """
+    inputs = [io_eval['x_p'], io_eval['r'], io_eval['LT']]
+    outputs = io_eval['LTy']
+    
+    if rchisq_max is not None:
+        idx = (io_eval['rchisq'] < rchisq_max)
+        inputs = [x[idx] for x in inputs]
+        outputs = outputs[idx]
+    
+    loss = nn_model.evaluate(
+        inputs,
+        outputs,
+        batch_size=batch_size,
+        verbose=0
+    )
+    
+    loss = [float(x) for x in loss] # Make JSON serializable
+    return loss
 
 
 def diagnostic_plots(nn_model, io_test, d_test, suffix=None):
@@ -1007,11 +1045,11 @@ def calc_dext_red_dtheta(nn_model, x_p, r):
 
 def main():
     # Load/create neural network
-    nn_name = 'test'
+    nn_name = 'new'
     n_hidden = 2
     nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
     #nn_model = keras.models.load_model(
-    #    'models/{:s}_{:d}hidden_it14.h5'.format(nn_name, n_hidden)
+    #    'models/{:s}_{:d}hidden_it13.h5'.format(nn_name, n_hidden)
     #)
     nn_model.summary()
     
@@ -1118,6 +1156,23 @@ def main():
     )
     t1 = time()
     print(f'Time elapsed to update covariances and reddenings: {t1-t0:.2f} s')
+
+    # Evaluate performance on (train, validation and test sets)
+    loss = {}
+    for n,io_eval in (('test',io_test), ('train',io_train)):
+        loss[n] = evaluate_model(
+            nn_model,
+            io_eval,
+            batch_size=batch_size,
+            rchisq_max=rchisq_max[-1]
+        )
+        print(f'{n} loss: {loss[n]}')
+    fname = 'data/loss_{:s}_{:d}hidden_it{:d}.json'.format(
+        nn_name, n_hidden, n_iterations-1
+    )
+    with open(fname, 'w') as f:
+        json.dump(loss, f, indent=2, sort_keys=True)
+    
     fname = 'data/predictions_{:s}_{:d}hidden_it{:d}.h5'.format(
         nn_name, n_hidden, n_iterations-1
     )
