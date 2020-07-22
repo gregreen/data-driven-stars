@@ -23,10 +23,18 @@ from time import time
 import json
 
 
-def load_data(fname):
+def load_data(fname, return_attrs=False):
     print(f'Loading {fname} ...')
+    attrs = {}
     with h5py.File(fname, 'r') as f:
-        d = f['io_data'][:]
+        dset = f['io_data']
+        for key in dset.attrs.keys():
+            attrs[key] = dset.attrs[key]
+        d = dset[:]
+    
+    if return_attrs:
+        return d, attrs
+    
     return d
 
 
@@ -485,7 +493,7 @@ def calc_chisq(dy, inv_cov_y):
     return chisq
 
 
-def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
+def get_nn_model(n_hidden_layers=1, hidden_size=32, l1=1.e0, l2=1.e-4, n_bands=13):
     # Stellar model: B M(theta)
     atm = keras.Input(shape=(3,), name='theta')
     x = atm
@@ -493,7 +501,8 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
         x = keras.layers.Dense(
             hidden_size,
             activation='sigmoid',
-            kernel_regularizer=keras.regularizers.l2(l=l2)
+            kernel_regularizer=keras.regularizers.l2(l=l2),
+            name=f'stellar_model_hidden_{i+1}'
         )(x)
     mag_color = keras.layers.Dense(n_bands, name='BM')(x)
 
@@ -501,13 +510,23 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
     red = keras.Input(shape=(1,), name='E')
     
     # Extinction vector: R(theta)
+    r = atm
+    #for i in range(n_hidden_layers):
+    #    r = keras.layers.Dense(
+    #        6,
+    #        use_bias=True,
+    #        activation='sigmoid',
+    #        kernel_regularizer=keras.regularizers.l2(l=l2),
+    #        name=f'extinction_model_hidden_{i+1}'
+    #    )(r)
     ext_vec = keras.layers.Dense(
         n_bands,
         use_bias=True,
         activation='exponential',
-        kernel_regularizer=keras.regularizers.l2(l=1.e0),
+        #kernel_regularizer=keras.regularizers.l1_l2(l1=1.e0, l2=1.e0),
+        kernel_regularizer=keras.regularizers.l1(l=l1),
         name='R'
-    )(atm)
+    )(r)
     
     # Extinction A = ER
     ext = keras.layers.Multiply(name='A')([red, ext_vec])
@@ -534,7 +553,11 @@ def get_nn_model(n_hidden_layers=1, hidden_size=32, l2=1.e-3, n_bands=13):
     LTy = keras.layers.Dot((2,1), name='LT_B_M_plus_A')([LT, y])
 
     # Compile model
-    model = keras.Model(inputs=[atm,red,LT], outputs=LTy)
+    model = keras.Model(
+        inputs=[atm,red,LT],
+        outputs=LTy,
+        name='green2020_stellar_photometry_model'
+    )
     model.compile(
         loss='mse',
         optimizer='Adam',
@@ -1043,21 +1066,31 @@ def calc_dext_red_dtheta(nn_model, x_p, r):
     return J
 
 
+def save_theta_norm(d_attrs, fname):
+    d = {
+        'theta_med': d_attrs['atm_param_med'].tolist(),
+        'theta_std': d_attrs['atm_param_std'].tolist()
+    }
+    with open(fname, 'w') as f:
+        json.dump(d, f)
+
+
 def main():
     # Load/create neural network
-    nn_name = 'new'
+    nn_name = 'ext_0h_l1n2'
     n_hidden = 2
-    nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4)
+    nn_model = get_nn_model(n_hidden_layers=n_hidden, l2=1.e-4, l1=1.e-2)
     #nn_model = keras.models.load_model(
-    #    'models/{:s}_{:d}hidden_it13.h5'.format(nn_name, n_hidden)
+    #    'models/{:s}_{:d}hidden_it14.h5'.format(nn_name, n_hidden)
     #)
     nn_model.summary()
     
     # Load stellar data
     print('Loading data ...')
     fname = 'data/apogee_lamost_galah_data.h5'
-    d = load_data(fname)
-    #d = d[::5]
+    d, d_attrs = load_data(fname, return_attrs=True)
+    #d = d[::25]
+    save_theta_norm(d_attrs, 'data/theta_normalization.json')
 
     # (training+validation) / test split
     # Fix random seed (same split every run)
@@ -1069,7 +1102,7 @@ def main():
 
     # Iteratively update dM/dtheta contribution to uncertainties,
     # reddening estimates and reduced chi^2 cut, and retrain.
-    n_iterations = 15
+    n_iterations = 20
     
     # On GPU, use large batch sizes for memory transfer efficiency
     batch_size = 1024
@@ -1079,9 +1112,9 @@ def main():
     rchisq_max = np.exp(np.linspace(
         np.log(rchisq_max_init),
         np.log(rchisq_max_final),
-        n_iterations-1
+        n_iterations-6
     ))
-    rchisq_max = [None] + rchisq_max.tolist()
+    rchisq_max = [None] + rchisq_max.tolist() + 5*[rchisq_max_final]
     print('chi^2/dof = {}'.format(rchisq_max))
 
     for k in range(0, n_iterations):
@@ -1134,18 +1167,18 @@ def main():
         #)
 
         # Plot results on test set
-        print('Diagnostic plots ...')
-        t0 = time()
-        diagnostic_plots(
-            nn_model,
-            io_test,
-            d_test,
-            #io_train,
-            #d_train,
-            suffix='{:s}_{:d}hidden_it{:d}'.format(nn_name, n_hidden, k)
-        )
-        t1 = time()
-        print(f'Time elapsed to make plots: {t1-t0:.2f} s')
+        #print('Diagnostic plots ...')
+        #t0 = time()
+        #diagnostic_plots(
+        #    nn_model,
+        #    io_test,
+        #    d_test,
+        #    #io_train,
+        #    #d_train,
+        #    suffix='{:s}_{:d}hidden_it{:d}'.format(nn_name, n_hidden, k)
+        #)
+        #t1 = time()
+        #print(f'Time elapsed to make plots: {t1-t0:.2f} s')
 
     print('Updating covariances and reddening estimates of test dataset ...')
     t0 = time()
@@ -1195,6 +1228,45 @@ def main():
         nn_name, n_hidden, n_iterations-1
     )
     save_predictions(fname, nn_model, d_comp, io_comp)
+    
+    print('Saving data and reddening estimates of subset of test dataset ...')
+    np.random.seed(5)
+    idx = np.arange(d_test.size)
+    np.random.shuffle(idx)
+    idx = idx[:10000]
+    d_small = d_test[idx]
+    r_fit_small = io_test['r'][idx]
+    r_var_small = io_test['r_var'][idx]
+    fname = 'data/test_data_small_{:s}_{:d}hidden.h5'.format(
+        nn_name, n_hidden
+    )
+    print(f'Saving subset to {fname} ...')
+    with h5py.File(fname, 'w') as f:
+        dset = f.create_dataset(
+            'data',
+            data=d_small,
+            chunks=True,
+            compression='gzip',
+            compression_opts=3
+        )
+        for key in d_attrs:
+            dset.attrs[key] = d_attrs[key]
+        
+        # Store updated reddening estimates
+        dset = f.create_dataset(
+            'r_fit',
+            data=r_fit_small,
+            chunks=True,
+            compression='gzip',
+            compression_opts=3
+        )
+        dset = f.create_dataset(
+            'r_var',
+            data=r_var_small,
+            chunks=True,
+            compression='gzip',
+            compression_opts=3
+        )
 
     return 0
 
