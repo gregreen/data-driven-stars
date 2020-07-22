@@ -205,6 +205,11 @@ def extract_data(d, b19, b19_err):
     #idx = ~np.isfinite(b19)
     #io_data['r'][idx] = d['SFD'][idx]
     #io_data['r_err'][idx] = d['SFD'][idx]
+    
+    # Stricter fracflux cut on WISE passbands
+    idx = (d['unwise_fracflux'] < 0.5)
+    d['unwise_mag'][idx] = np.nan
+    d['unwise_mag_err'][idx] = np.nan
 
     # Copy in magnitudes
     io_data['mag'][:,0] = d['gaia_g_mag']
